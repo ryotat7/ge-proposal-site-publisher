@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# End-to-end deployment script for the Interactive Proposal Site Publisher
+# on Google Cloud (Cloud Storage, Firestore, Vertex AI Search, Cloud Run,
+# Vertex AI Agent Runtime, and Gemini Enterprise).
+
+set -euo pipefail
+
+PROJECT_ID="${PROJECT_ID:?Please set PROJECT_ID to your Google Cloud project ID}"
+REGION="${REGION:-us-central1}"
+PROPOSAL_GCS_BUCKET="${PROPOSAL_GCS_BUCKET:-${PROJECT_ID}-proposals}"
+PROPOSAL_FIRESTORE_COLLECTION="${PROPOSAL_FIRESTORE_COLLECTION:-presentations}"
+VERTEX_SEARCH_DATASTORE_ID="${VERTEX_SEARCH_DATASTORE_ID:-proposal-knowledge-datastore}"
+GATEWAY_SERVICE_NAME="${GATEWAY_SERVICE_NAME:-proposal-hosting-gateway}"
+PROPOSAL_BRAND_NAME="${PROPOSAL_BRAND_NAME:-Strategic AI Partners}"
+PROPOSAL_BRAND_BADGE="${PROPOSAL_BRAND_BADGE:-SP}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+echo "==> [1/6] Enabling required Google Cloud APIs in ${PROJECT_ID}..."
+gcloud services enable \
+  aiplatform.googleapis.com \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com \
+  firestore.googleapis.com \
+  storage.googleapis.com \
+  discoveryengine.googleapis.com \
+  secretmanager.googleapis.com \
+  --project="${PROJECT_ID}"
+
+echo "==> [2/6] Provisioning private Cloud Storage bucket (gs://${PROPOSAL_GCS_BUCKET})..."
+if ! gcloud storage buckets describe "gs://${PROPOSAL_GCS_BUCKET}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+  gcloud storage buckets create "gs://${PROPOSAL_GCS_BUCKET}" \
+    --project="${PROJECT_ID}" \
+    --location="${REGION}" \
+    --uniform-bucket-level-access \
+    --public-access-prevention
+else
+  gcloud storage buckets update "gs://${PROPOSAL_GCS_BUCKET}" \
+    --project="${PROJECT_ID}" \
+    --uniform-bucket-level-access \
+    --public-access-prevention
+fi
+
+echo "==> [3/6] Ensuring Firestore Native database exists..."
+if ! gcloud firestore databases describe --database="(default)" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+  gcloud firestore databases create \
+    --database="(default)" \
+    --location="${REGION}" \
+    --type=firestore-native \
+    --project="${PROJECT_ID}"
+fi
+
+echo "==> [4/6] Seeding sample knowledge documents into Vertex AI Search datastore (${VERTEX_SEARCH_DATASTORE_ID})..."
+PROJECT_ID="${PROJECT_ID}" \
+PROPOSAL_GCS_BUCKET="${PROPOSAL_GCS_BUCKET}" \
+VERTEX_SEARCH_DATASTORE_ID="${VERTEX_SEARCH_DATASTORE_ID}" \
+python3 "${SCRIPT_DIR}/seed_datastore.py"
+
+echo "==> [5/6] Deploying Cloud Run Hosting Gateway (${GATEWAY_SERVICE_NAME})..."
+if [[ -z "${GATEWAY_SESSION_SECRET:-}" ]]; then
+  GATEWAY_SESSION_SECRET="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+fi
+
+gcloud run deploy "${GATEWAY_SERVICE_NAME}" \
+  --source="${REPO_ROOT}/hosting_gateway" \
+  --region="${REGION}" \
+  --project="${PROJECT_ID}" \
+  --allow-unauthenticated \
+  --set-env-vars="PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},PROPOSAL_GCS_BUCKET=${PROPOSAL_GCS_BUCKET},PROPOSAL_FIRESTORE_COLLECTION=${PROPOSAL_FIRESTORE_COLLECTION},PROPOSAL_BRAND_NAME=${PROPOSAL_BRAND_NAME},PROPOSAL_BRAND_BADGE=${PROPOSAL_BRAND_BADGE},GATEWAY_SESSION_SECRET=${GATEWAY_SESSION_SECRET}" \
+  --quiet
+
+HOSTING_BASE_URL="$(gcloud run services describe "${GATEWAY_SERVICE_NAME}" \
+  --region="${REGION}" \
+  --project="${PROJECT_ID}" \
+  --format='value(status.url)')"
+echo "    Hosting Gateway live at: ${HOSTING_BASE_URL}"
+
+echo "==> [6/6] Deploying ADK Interactive Proposal Concierge Agent to Vertex AI Agent Runtime..."
+cd "${REPO_ROOT}/proposal_agent"
+agents-cli deploy \
+  --project="${PROJECT_ID}" \
+  --region="${REGION}" \
+  --no-confirm-project \
+  --update-env-vars="PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},PROPOSAL_GCS_BUCKET=${PROPOSAL_GCS_BUCKET},PROPOSAL_FIRESTORE_COLLECTION=${PROPOSAL_FIRESTORE_COLLECTION},HOSTING_BASE_URL=${HOSTING_BASE_URL},VERTEX_SEARCH_DATASTORE_ID=${VERTEX_SEARCH_DATASTORE_ID},VERTEX_SEARCH_LOCATION=global,PROPOSAL_BRAND_NAME=${PROPOSAL_BRAND_NAME},PROPOSAL_BRAND_BADGE=${PROPOSAL_BRAND_BADGE}"
+
+if [[ -n "${GE_APP_ID:-}" ]]; then
+  echo "==> Publishing agent to Gemini Enterprise (App ID: ${GE_APP_ID})..."
+  agents-cli publish gemini-enterprise \
+    --project="${PROJECT_ID}" \
+    --app-id="${GE_APP_ID}" \
+    --display-name="${GE_DISPLAY_NAME:-Interactive Proposal Site Concierge}" \
+    --description="Interactive consultation, bespoke 6-slide HTML5 proposal website generation, and post-publication lifecycle management."
+fi
+
+echo "==> Deployment complete!"
+echo "    Hosting Gateway URL: ${HOSTING_BASE_URL}"

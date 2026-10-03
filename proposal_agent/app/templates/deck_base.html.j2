@@ -1,0 +1,478 @@
+{% set theme = deck.theme_color | default('sky') %}
+{% if theme == 'emerald' %}
+  {% set accent_text = 'text-emerald-400' %}
+  {% set accent_text_light = 'text-emerald-300' %}
+  {% set accent_bg = 'bg-emerald-500' %}
+  {% set accent_bg_hover = 'hover:bg-emerald-400' %}
+  {% set accent_bg_soft = 'bg-emerald-500/10' %}
+  {% set accent_border = 'border-emerald-400' %}
+  {% set accent_border_soft = 'border-emerald-400/30' %}
+  {% set grad_from = 'from-emerald-400' %}
+  {% set grad_to = 'to-teal-600' %}
+{% elif theme == 'violet' %}
+  {% set accent_text = 'text-violet-400' %}
+  {% set accent_text_light = 'text-violet-300' %}
+  {% set accent_bg = 'bg-violet-500' %}
+  {% set accent_bg_hover = 'hover:bg-violet-400' %}
+  {% set accent_bg_soft = 'bg-violet-500/10' %}
+  {% set accent_border = 'border-violet-400' %}
+  {% set accent_border_soft = 'border-violet-400/30' %}
+  {% set grad_from = 'from-violet-400' %}
+  {% set grad_to = 'to-fuchsia-600' %}
+{% elif theme == 'amber' %}
+  {% set accent_text = 'text-amber-400' %}
+  {% set accent_text_light = 'text-amber-300' %}
+  {% set accent_bg = 'bg-amber-500' %}
+  {% set accent_bg_hover = 'hover:bg-amber-400' %}
+  {% set accent_bg_soft = 'bg-amber-500/10' %}
+  {% set accent_border = 'border-amber-400' %}
+  {% set accent_border_soft = 'border-amber-400/30' %}
+  {% set grad_from = 'from-amber-400' %}
+  {% set grad_to = 'to-orange-600' %}
+{% elif theme == 'rose' %}
+  {% set accent_text = 'text-rose-400' %}
+  {% set accent_text_light = 'text-rose-300' %}
+  {% set accent_bg = 'bg-rose-500' %}
+  {% set accent_bg_hover = 'hover:bg-rose-400' %}
+  {% set accent_bg_soft = 'bg-rose-500/10' %}
+  {% set accent_border = 'border-rose-400' %}
+  {% set accent_border_soft = 'border-rose-400/30' %}
+  {% set grad_from = 'from-rose-400' %}
+  {% set grad_to = 'to-pink-600' %}
+{% else %}
+  {% set accent_text = 'text-sky-400' %}
+  {% set accent_text_light = 'text-sky-300' %}
+  {% set accent_bg = 'bg-sky-500' %}
+  {% set accent_bg_hover = 'hover:bg-sky-400' %}
+  {% set accent_bg_soft = 'bg-sky-500/10' %}
+  {% set accent_border = 'border-sky-400' %}
+  {% set accent_border_soft = 'border-sky-400/30' %}
+  {% set grad_from = 'from-sky-400' %}
+  {% set grad_to = 'to-indigo-600' %}
+{% endif %}
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ deck.client_name }} 御中 - {{ deck.proposal_title }} | {{ brand_name | default('Strategic AI Partners') }}</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- GSAP 3.12.2 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+  <!-- FontAwesome 6.4.0 -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Noto+Sans+JP:wght@400;500;700;900&family=Plus+Jakarta+Sans:wght@500;700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --font-sans: 'Plus Jakarta Sans', 'Noto Sans JP', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+    body {
+      font-family: var(--font-sans);
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background-color: #0b0f19;
+      color: #f8fafc;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+    .font-mono-code {
+      font-family: var(--font-mono);
+    }
+    .slide {
+      position: absolute;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      display: none;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 3.5rem 5rem 5.5rem 5rem;
+      box-sizing: border-box;
+    }
+    .slide.active {
+      display: flex;
+    }
+    .glass-card {
+      background: rgba(15, 23, 42, 0.78);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      box-shadow: 0 20px 50px rgba(2, 6, 23, 0.5);
+    }
+    .bg-grid-pattern {
+      background-image: radial-gradient(rgba(56, 189, 248, 0.12) 1px, transparent 1px);
+      background-size: 32px 32px;
+    }
+  </style>
+</head>
+<body class="bg-grid-pattern relative" data-theme="{{ theme }}">
+  <!-- Ambient Glows -->
+  <div class="pointer-events-none fixed -top-40 -left-40 w-96 h-96 rounded-full {{ accent_bg_soft }} blur-3xl"></div>
+  <div class="pointer-events-none fixed -bottom-40 -right-40 w-96 h-96 rounded-full bg-indigo-500/15 blur-3xl"></div>
+
+  <!-- Top Brand Header -->
+  <header class="fixed top-0 left-0 right-0 z-30 flex items-center justify-between px-20 py-5 pointer-events-none">
+    <div class="flex items-center gap-3">
+      <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-gradient-to-br {{ grad_from }} {{ grad_to }} text-white font-bold text-sm shadow">{{ brand_badge | default('SP') }}</span>
+      <span class="font-mono-code text-xs tracking-widest uppercase text-slate-400">{{ brand_name | default('Strategic AI Partners') }} // Strategic Digital Proposal</span>
+    </div>
+    <div class="font-mono-code text-xs text-slate-400">
+      CONFIDENTIAL // FOR {{ deck.client_name }}
+    </div>
+  </header>
+
+  <main id="deck-container" class="relative w-full h-full">
+    <!-- Slide 01: Hero Cover -->
+    <section class="slide active" data-slide-index="0" data-layout="hero-cover">
+      <div class="my-auto max-w-5xl">
+        <div class="anim-item inline-flex items-center gap-2 px-4 py-1.5 rounded-full {{ accent_bg_soft }} border {{ accent_border_soft }} {{ accent_text_light }} text-xs font-mono-code mb-6">
+          <i class="fa-solid fa-compass"></i>
+          <span>BESPOKE EXECUTIVE PROPOSAL // THEME: {{ theme | upper }}</span>
+        </div>
+        <h2 class="anim-item text-2xl md:text-3xl font-bold {{ accent_text }} mb-3 tracking-wide">
+          {{ deck.client_name }} 御中
+        </h2>
+        <h1 class="anim-item text-4xl md:text-6xl font-black tracking-tight leading-tight text-white mb-6">
+          {{ deck.proposal_title }}
+        </h1>
+        <p class="anim-item text-lg md:text-xl text-slate-300 leading-relaxed max-w-3xl border-l-4 {{ accent_border }} pl-5 py-1">
+          {{ deck.subtitle }}
+        </p>
+        {% if deck.custom_callout %}
+        <div class="anim-item mt-6 inline-flex items-center gap-3 px-4 py-2.5 rounded-xl glass-card border {{ accent_border_soft }} text-xs text-slate-200">
+          <i class="fa-solid fa-sparkles {{ accent_text }}"></i>
+          <span>{{ deck.custom_callout }}</span>
+        </div>
+        {% endif %}
+      </div>
+      <div class="anim-item flex items-center justify-between border-t border-slate-800 pt-4 text-xs text-slate-400 font-mono-code">
+        <span>PREPARED BY: {{ (brand_name | default('STRATEGIC AI PARTNERS')) | upper }}</span>
+        <span>GENERATED AT: {{ generated_date }}</span>
+      </div>
+    </section>
+
+    <!-- Slide 02: Asymmetric Bento Executive Summary -->
+    <section class="slide" data-slide-index="1" data-layout="bento-executive-summary">
+      <div class="mt-8">
+        <div class="anim-item flex items-center gap-2 {{ accent_text }} font-mono-code text-xs uppercase tracking-widest mb-1">
+          <span>02 // Executive Summary &amp; Diagnostic Bento</span>
+        </div>
+        <h2 class="anim-item text-3xl font-bold text-white">現状の課題認識と本提案の結論</h2>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 my-auto">
+        {% for item in deck.current_challenges %}
+        <div class="anim-item glass-card rounded-2xl p-6 border-t-4 border-t-rose-500/80 flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between mb-4">
+              <span class="font-mono-code text-xs text-rose-400 uppercase tracking-wider">Challenge 0{{ loop.index }}</span>
+              <i class="fa-solid fa-triangle-exclamation text-rose-400 text-lg"></i>
+            </div>
+            <h3 class="text-lg font-bold text-white mb-2">{{ item.title }}</h3>
+            <p class="text-sm text-slate-300 leading-relaxed">{{ item.description }}</p>
+          </div>
+          <div class="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] font-mono-code text-slate-400">
+            <span>PRIORITY: HIGH</span>
+            <span class="{{ accent_text }}">TARGET FOR AI TRANSFORMATION</span>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+
+      <div class="anim-item glass-card rounded-2xl p-6 border-l-4 {{ accent_border }} bg-gradient-to-r {{ accent_bg_soft }} to-transparent">
+        <div class="flex items-center gap-3 mb-2">
+          <i class="fa-solid fa-lightbulb {{ accent_text }} text-xl"></i>
+          <span class="font-mono-code text-xs uppercase tracking-wider {{ accent_text_light }}">Strategic Conclusion // 変革の結論</span>
+        </div>
+        <p class="text-base md:text-lg font-semibold text-white leading-relaxed">
+          {{ deck.executive_conclusion }}
+        </p>
+      </div>
+    </section>
+
+    <!-- Slide 03: Split As-Is / To-Be Comparison Matrix & CX Highlights -->
+    <section class="slide" data-slide-index="2" data-layout="as-is-to-be-comparison">
+      <div class="mt-8">
+        <div class="anim-item flex items-center gap-2 {{ accent_text }} font-mono-code text-xs uppercase tracking-widest mb-1">
+          <span>03 // Solution Approach &amp; CX Transformation</span>
+        </div>
+        <h2 class="anim-item text-3xl font-bold text-white">解決アプローチと顧客体験（UX / AI）の変革</h2>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6 my-auto">
+        <div class="anim-item glass-card rounded-2xl p-6 border border-slate-700/80">
+          <div class="flex items-center gap-2 text-slate-400 font-mono-code text-xs uppercase mb-3">
+            <i class="fa-solid fa-clock-rotate-left"></i>
+            <span>AS-IS (Before) // 従来の業務・体験</span>
+          </div>
+          <ul class="space-y-3 text-sm text-slate-300">
+            {% for b in deck.before_state %}
+            <li class="flex items-start gap-3">
+              <i class="fa-solid fa-xmark text-rose-400 mt-1"></i>
+              <span>{{ b }}</span>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+
+        <div class="anim-item glass-card rounded-2xl p-6 border {{ accent_border_soft }} {{ accent_bg_soft }}">
+          <div class="flex items-center gap-2 {{ accent_text_light }} font-mono-code text-xs uppercase mb-3">
+            <i class="fa-solid fa-wand-magic-sparkles"></i>
+            <span>TO-BE (After) // AI・デジタル変革後の体験</span>
+          </div>
+          <ul class="space-y-3 text-sm text-slate-100">
+            {% for a in deck.after_state %}
+            <li class="flex items-start gap-3">
+              <i class="fa-solid fa-circle-check text-emerald-400 mt-1"></i>
+              <span>{{ a }}</span>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {% for cx in deck.cx_highlights %}
+        <div class="anim-item glass-card rounded-xl p-4 flex items-start gap-3">
+          <div class="w-9 h-9 rounded-lg {{ accent_bg_soft }} border {{ accent_border_soft }} flex items-center justify-center {{ accent_text_light }} shrink-0">
+            <i class="fa-solid fa-bolt"></i>
+          </div>
+          <div>
+            <h4 class="text-sm font-bold text-white">{{ cx.title }}</h4>
+            <p class="text-xs text-slate-300 mt-1 leading-relaxed">{{ cx.detail }}</p>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <!-- Slide 04: 4-Layer Architecture Flow with SVG Connectors -->
+    <section class="slide" data-slide-index="3" data-layout="architecture-flow">
+      <div class="mt-8">
+        <div class="anim-item flex items-center gap-2 {{ accent_text }} font-mono-code text-xs uppercase tracking-widest mb-1">
+          <span>04 // System &amp; Data Integration Architecture</span>
+        </div>
+        <h2 class="anim-item text-3xl font-bold text-white">システム・データ連携アーキテクチャ（4層構成）</h2>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-5 my-auto relative">
+        {% for node in deck.architecture_nodes %}
+        <div class="anim-item glass-card rounded-2xl p-5 flex flex-col justify-between relative border-t-4 {{ accent_border }}">
+          <div>
+            <div class="flex items-center justify-between mb-3">
+              <span class="font-mono-code text-xs {{ accent_text }}">LAYER 0{{ loop.index }}</span>
+              <i class="fa-solid {{ node.icon or 'fa-layer-group' }} {{ accent_text_light }} text-lg"></i>
+            </div>
+            <h3 class="text-base font-bold text-white mb-3">{{ node.layer_name }}</h3>
+            <div class="space-y-2 mb-4">
+              {% for comp in node.components %}
+              <div class="px-3 py-1.5 rounded-lg bg-slate-800/90 border border-slate-700 text-xs font-medium text-slate-200 flex items-center gap-2">
+                <i class="fa-solid fa-cube {{ accent_text }} text-[10px]"></i>
+                <span>{{ comp }}</span>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          <p class="text-xs text-slate-400 leading-relaxed border-t border-slate-800 pt-3">
+            {{ node.description }}
+          </p>
+        </div>
+        {% endfor %}
+      </div>
+
+      <div class="anim-item text-xs text-slate-400 font-mono-code flex items-center justify-between">
+        <span><i class="fa-solid fa-shield-halved text-emerald-400 mr-2"></i>ZERO-TRUST ACCESS &amp; ENTERPRISE GOVERNANCE ENABLED</span>
+        <span class="flex items-center gap-2">
+          <span>DATA &amp; INFERENCE PIPELINE</span>
+          <svg class="w-16 h-3 text-sky-400" viewBox="0 0 64 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M0 6H58M58 6L52 1M58 6L52 11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </span>
+      </div>
+    </section>
+
+    <!-- Slide 05: 3-Phase Implementation Roadmap Timeline -->
+    <section class="slide" data-slide-index="4" data-layout="roadmap-timeline">
+      <div class="mt-8">
+        <div class="anim-item flex items-center gap-2 {{ accent_text }} font-mono-code text-xs uppercase tracking-widest mb-1">
+          <span>05 // Implementation Roadmap</span>
+        </div>
+        <h2 class="anim-item text-3xl font-bold text-white">導入ロードマップ（Phase 1 〜 Phase 3）</h2>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 my-auto">
+        {% for phase in deck.roadmap_phases %}
+        <div class="anim-item glass-card rounded-2xl p-6 flex flex-col justify-between border-l-4 {{ accent_border }}">
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-mono-code text-xs px-2.5 py-1 rounded {{ accent_bg_soft }} {{ accent_text_light }} font-semibold">{{ phase.period }}</span>
+              <span class="font-mono-code text-xs text-slate-400">PHASE 0{{ loop.index }}</span>
+            </div>
+            <h3 class="text-lg font-bold text-white mb-4">{{ phase.phase_name }}</h3>
+            <ul class="space-y-2.5 text-sm text-slate-300 mb-4">
+              {% for d in phase.deliverables %}
+              <li class="flex items-start gap-2.5">
+                <i class="fa-solid fa-check {{ accent_text }} mt-1 text-xs"></i>
+                <span>{{ d }}</span>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          <div class="pt-3 border-t border-slate-800 text-xs text-emerald-300 font-mono-code flex items-center gap-2">
+            <i class="fa-solid fa-flag-checkered"></i>
+            <span>Milestone: {{ phase.milestone }}</span>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+
+      <div class="anim-item text-xs text-slate-400 font-mono-code">
+        <i class="fa-solid fa-circle-info {{ accent_text }} mr-2"></i>アジャイルスプリント方式により、初期プロトタイプを最短2週間で立ち上げ、段階的に本番展開します。
+      </div>
+    </section>
+
+    <!-- Slide 06: Expected ROI & Immediate Next Steps Matrix -->
+    <section class="slide" data-slide-index="5" data-layout="roi-and-next-steps">
+      <div class="mt-8">
+        <div class="anim-item flex items-center gap-2 {{ accent_text }} font-mono-code text-xs uppercase tracking-widest mb-1">
+          <span>06 // Expected ROI &amp; Next Steps</span>
+        </div>
+        <h2 class="anim-item text-3xl font-bold text-white">期待効果（ROI）とネクストステップ</h2>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6 my-auto">
+        <div class="anim-item glass-card rounded-2xl p-6">
+          <div class="flex items-center gap-2 text-emerald-400 font-mono-code text-xs uppercase mb-4">
+            <i class="fa-solid fa-chart-line"></i>
+            <span>Quantitative &amp; Qualitative Impact // 期待効果</span>
+          </div>
+          <div class="space-y-3 mb-4">
+            {% for q in deck.quantitative_roi %}
+            <div class="p-3 rounded-xl bg-emerald-950/30 border border-emerald-500/30 flex items-center gap-3">
+              <i class="fa-solid fa-arrow-trend-up text-emerald-400 text-lg"></i>
+              <span class="text-sm font-bold text-white">{{ q }}</span>
+            </div>
+            {% endfor %}
+          </div>
+          <ul class="space-y-2 text-xs text-slate-300">
+            {% for ql in deck.qualitative_roi %}
+            <li class="flex items-start gap-2">
+              <i class="fa-solid fa-star text-amber-400 mt-0.5"></i>
+              <span>{{ ql }}</span>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+
+        <div class="anim-item glass-card rounded-2xl p-6">
+          <div class="flex items-center gap-2 {{ accent_text }} font-mono-code text-xs uppercase mb-4">
+            <i class="fa-solid fa-list-check"></i>
+            <span>Immediate Action Items // 直近のネクストステップ</span>
+          </div>
+          <div class="space-y-3">
+            {% for step in deck.next_steps %}
+            <div class="p-3.5 rounded-xl bg-slate-800/80 border border-slate-700 flex items-start gap-3">
+              <span class="w-6 h-6 rounded-full {{ accent_bg_soft }} {{ accent_text_light }} font-mono-code text-xs flex items-center justify-center shrink-0 mt-0.5">
+                {{ loop.index }}
+              </span>
+              <span class="text-sm text-slate-200">{{ step }}</span>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+
+      <div class="anim-item text-center text-xs text-slate-400 font-mono-code">
+        THANK YOU FOR YOUR TIME // {{ (brand_name | default('STRATEGIC AI PARTNERS')) | upper }}
+      </div>
+    </section>
+  </main>
+
+  <!-- Bottom Navigation Bar & Progress -->
+  <footer class="fixed bottom-0 left-0 right-0 z-30 px-20 py-4 bg-slate-950/80 backdrop-blur-md border-t border-slate-800/80 flex items-center justify-between">
+    <div class="flex items-center gap-4">
+      <span id="slide-counter" class="font-mono-code text-sm font-bold {{ accent_text }}">01 / 06</span>
+      <div class="w-48 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+        <div id="progress-bar" class="h-full bg-gradient-to-r {{ grad_from }} {{ grad_to }} transition-all duration-300" style="width: 16.66%;"></div>
+      </div>
+    </div>
+    <div class="flex items-center gap-2">
+      <button id="prev-btn" type="button" class="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-mono-code transition flex items-center gap-1.5">
+        <i class="fa-solid fa-chevron-left"></i> PREV
+      </button>
+      <button id="next-btn" type="button" class="px-3.5 py-1.5 rounded-lg {{ accent_bg }} {{ accent_bg_hover }} text-slate-950 font-bold text-xs font-mono-code transition flex items-center gap-1.5">
+        NEXT <i class="fa-solid fa-chevron-right"></i>
+      </button>
+    </div>
+  </footer>
+
+  <script>
+    (function() {
+      const slides = Array.from(document.querySelectorAll('.slide'));
+      const totalSlides = slides.length;
+      const counterEl = document.getElementById('slide-counter');
+      const progressEl = document.getElementById('progress-bar');
+      const prevBtn = document.getElementById('prev-btn');
+      const nextBtn = document.getElementById('next-btn');
+      let currentIndex = 0;
+
+      function pad2(n) {
+        return n < 10 ? '0' + n : '' + n;
+      }
+
+      function animateSlide(slideEl) {
+        if (typeof gsap !== 'undefined') {
+          const items = slideEl.querySelectorAll('.anim-item');
+          gsap.fromTo(
+            items,
+            { opacity: 0, y: 24 },
+            { opacity: 1, y: 0, duration: 0.55, stagger: 0.08, ease: 'power2.out' }
+          );
+        }
+      }
+
+      function showSlide(index) {
+        if (index < 0 || index >= totalSlides) return;
+        slides.forEach((s, idx) => {
+          if (idx === index) {
+            s.classList.add('active');
+          } else {
+            s.classList.remove('active');
+          }
+        });
+        currentIndex = index;
+        counterEl.textContent = pad2(currentIndex + 1) + ' / ' + pad2(totalSlides);
+        const pct = ((currentIndex + 1) / totalSlides) * 100;
+        progressEl.style.width = pct.toFixed(2) + '%';
+        animateSlide(slides[currentIndex]);
+      }
+
+      prevBtn.addEventListener('click', function() {
+        showSlide(currentIndex - 1);
+      });
+
+      nextBtn.addEventListener('click', function() {
+        showSlide(currentIndex + 1);
+      });
+
+      window.addEventListener('keydown', function(e) {
+        if (e.key === 'ArrowRight' || e.key === ' ') {
+          e.preventDefault();
+          showSlide(currentIndex + 1);
+        } else if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          showSlide(currentIndex - 1);
+        }
+      });
+
+      showSlide(0);
+    })();
+  </script>
+</body>
+</html>

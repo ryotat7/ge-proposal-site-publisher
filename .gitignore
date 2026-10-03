@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.env
+*.egg-info/
+dist/
+build/
+.agents-cli-deployment.json
+live_e2e_verification_result.json
+.DS_Store
