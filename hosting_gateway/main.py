@@ -69,16 +69,14 @@ def _get_cookie_name(presentation_id: str) -> str:
 
 
 def _get_session_secret() -> bytes:
-    global _EPHEMERAL_SECRET
     env_secret = os.environ.get("GATEWAY_SESSION_SECRET")
     if env_secret:
         return env_secret.encode("utf-8")
-    if _EPHEMERAL_SECRET is None:
-        logger.warning(
-            "GATEWAY_SESSION_SECRET not set; generating ephemeral instance-isolated secret."
+    return hashlib.sha256(
+        f"proposal-gateway-session:{_get_project_id()}:{_get_bucket_name()}".encode(
+            "utf-8"
         )
-        _EPHEMERAL_SECRET = secrets.token_hex(32).encode("utf-8")
-    return _EPHEMERAL_SECRET
+    ).digest()
 
 
 def verify_pbkdf2_password(
@@ -88,7 +86,7 @@ def verify_pbkdf2_password(
     try:
         dk = hashlib.pbkdf2_hmac(
             "sha256",
-            password.encode("utf-8"),
+            password.strip().encode("utf-8"),
             bytes.fromhex(salt_hex),
             120_000,
         )
@@ -98,11 +96,15 @@ def verify_pbkdf2_password(
 
 
 def create_session_token(
-    presentation_id: str, viewer_id: str, ttl_seconds: int = 86400
+    presentation_id: str,
+    viewer_id: str,
+    ttl_seconds: int = 86400,
+    password_version: str = "",
 ) -> str:
     """Creates an HMAC-SHA256 signed session token."""
     exp = int(time.time()) + ttl_seconds
-    payload = f"{presentation_id}:{viewer_id}:{exp}"
+    ver = password_version[:12] if password_version else "v1"
+    payload = f"{presentation_id}:{viewer_id}:{exp}:{ver}"
     sig = hmac.new(
         _get_session_secret(), payload.encode("utf-8"), hashlib.sha256
     ).hexdigest()
@@ -110,19 +112,28 @@ def create_session_token(
     return base64.urlsafe_b64encode(raw).decode("ascii")
 
 
-def verify_session_token(token: str, expected_presentation_id: str) -> str | None:
+def verify_session_token(
+    token: str,
+    expected_presentation_id: str,
+    expected_password_version: str = "",
+) -> str | None:
     """Verifies an HMAC-SHA256 signed session token and returns viewer_id if valid."""
     try:
         decoded = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
         parts = decoded.split(":")
-        if len(parts) != 4:
+        if len(parts) != 5:
             return None
-        presentation_id, viewer_id, exp_str, sig = parts
+        presentation_id, viewer_id, exp_str, ver, sig = parts
         if presentation_id != expected_presentation_id:
             return None
         if int(exp_str) < int(time.time()):
             return None
-        payload = f"{presentation_id}:{viewer_id}:{exp_str}"
+        expected_ver = (
+            expected_password_version[:12] if expected_password_version else "v1"
+        )
+        if not hmac.compare_digest(ver, expected_ver):
+            return None
+        payload = f"{presentation_id}:{viewer_id}:{exp_str}:{ver}"
         expected_sig = hmac.new(
             _get_session_secret(), payload.encode("utf-8"), hashlib.sha256
         ).hexdigest()
@@ -303,6 +314,7 @@ def view_presentation(presentation_id: str, request: Request) -> Response:
 
     authenticated_viewer: str | None = None
     auth_method = ""
+    pw_version = str(doc.get("password_hash", ""))
 
     auth_header = request.headers.get("authorization", "")
     cookie_name = _get_cookie_name(presentation_id)
@@ -311,22 +323,30 @@ def view_presentation(presentation_id: str, request: Request) -> Response:
             encoded = auth_header.split(" ", 1)[1].strip()
             decoded = base64.b64decode(encoded).decode("utf-8")
             username, password = decoded.split(":", 1)
+            username_clean = username.strip()
             if hmac.compare_digest(
-                username, str(doc.get("viewer_id", ""))
+                username_clean, str(doc.get("viewer_id", "")).strip()
             ) and verify_pbkdf2_password(
                 password,
-                str(doc.get("password_hash", "")),
+                pw_version,
                 str(doc.get("password_salt", "")),
             ):
-                authenticated_viewer = username
+                authenticated_viewer = username_clean
                 auth_method = "basic_auth"
         except Exception:
             authenticated_viewer = None
-    else:
+
+    if not authenticated_viewer:
         cookie_token = request.cookies.get(cookie_name)
         if cookie_token:
-            verified_viewer = verify_session_token(cookie_token, presentation_id)
-            if verified_viewer and verified_viewer == doc.get("viewer_id"):
+            verified_viewer = verify_session_token(
+                cookie_token,
+                presentation_id,
+                expected_password_version=pw_version,
+            )
+            if verified_viewer and verified_viewer == str(
+                doc.get("viewer_id", "")
+            ).strip():
                 authenticated_viewer = verified_viewer
                 auth_method = "session_cookie"
 
@@ -335,12 +355,18 @@ def view_presentation(presentation_id: str, request: Request) -> Response:
             presentation_id=presentation_id,
             client_name=doc.get("client_name", "Client"),
         )
+        accept_hdr = request.headers.get("accept", "").lower()
+        resp_headers = (
+            {}
+            if "text/html" in accept_hdr
+            else {
+                "WWW-Authenticate": f'Basic realm="{_get_brand_name()} Proposal Portal"'
+            }
+        )
         return HTMLResponse(
             content=login_html,
             status_code=401,
-            headers={
-                "WWW-Authenticate": f'Basic realm="{_get_brand_name()} Proposal Portal"'
-            },
+            headers=resp_headers,
         )
 
     _record_access_log(presentation_id, authenticated_viewer, auth_method, request)
@@ -366,7 +392,11 @@ def view_presentation(presentation_id: str, request: Request) -> Response:
         },
     )
     if auth_method == "basic_auth":
-        token = create_session_token(presentation_id, authenticated_viewer)
+        token = create_session_token(
+            presentation_id,
+            authenticated_viewer,
+            password_version=pw_version,
+        )
         response.set_cookie(
             key=cookie_name,
             value=token,
@@ -396,14 +426,20 @@ def authenticate_presentation(
             status_code=403,
         )
 
+    pw_version = str(doc.get("password_hash", ""))
+    clean_vid = viewer_id.strip()
     if hmac.compare_digest(
-        viewer_id.strip(), str(doc.get("viewer_id", ""))
+        clean_vid, str(doc.get("viewer_id", "")).strip()
     ) and verify_pbkdf2_password(
         password,
-        str(doc.get("password_hash", "")),
+        pw_version,
         str(doc.get("password_salt", "")),
     ):
-        token = create_session_token(presentation_id, viewer_id.strip())
+        token = create_session_token(
+            presentation_id,
+            clean_vid,
+            password_version=pw_version,
+        )
         cookie_name = _get_cookie_name(presentation_id)
         redirect = RedirectResponse(
             url=f"/p/{presentation_id}",
