@@ -22,6 +22,17 @@ Each published presentation is stored at `presentations/<presentation_id>`:
 | `created_at` | `string` | ISO-8601 UTC timestamp |
 | `updated_at` | `string` | ISO-8601 UTC timestamp |
 | `expires_at` | `string` | ISO-8601 UTC expiration timestamp |
+| `generation_status` | `string` | `"generating"` → `"ready"` (or `"failed"`) — drives the gateway's 'generating' page |
+| `generation_phase` | `string` | `queued` / `knowledge_search` / `managed_agents` / `gemini_fast` / `deterministic` / `rendering` / `ready` |
+| `generation_detail` | `string` | Free-text progress detail (e.g. interaction id, elapsed seconds) |
+| `generation_engine` | `string` | Engine that produced the deck: `managed_agents_api:<model>`, `agent_platform_gemini_with_skill:<model>`, `deterministic_skill_template[:reason]`, `state_deck_spec` |
+| `generation_engine_label` | `string` | Human-readable Japanese label of `generation_engine` |
+| `generation_requested_at` / `ready_at` | `string` | ISO-8601 UTC timestamps of the request and completion |
+| `generation_elapsed_seconds` | `number` | Wall-clock generation time |
+| `generation_dispatch` | `string` | `cloud_run_job` / `inline_thread` / `sync` — how the background work was started |
+| `generation_execution` | `string` | Cloud Run job execution name (when dispatched to the job) |
+| `generation_inputs` | `map` | `client_name`, `proposal_title`, `proposal_brief`, `theme_color`, `outline_hint`, `expiration_days` consumed by the worker |
+| `generation_error` | `string` | Last error message when `generation_status="failed"` |
 
 ### Subcollection: `presentations/<presentation_id>/access_logs`
 
@@ -41,6 +52,25 @@ Grant the following roles to both the Compute Engine default service account (`<
 - `roles/discoveryengine.viewer` (Project-level, for Agent Search grounding)
 - `roles/aiplatform.user` (Project-level, for Agent Platform Gemini / Managed Agents API calls)
 - `roles/serviceusage.serviceUsageConsumer` (Project-level, for quota project checks)
+- `roles/run.developer` (Project-level, for `run.jobs.run` / `run.jobs.runWithOverrides` — the agent triggers the generation job with a per-execution `PRESENTATION_ID` override; `roles/run.invoker` alone is **not** sufficient)
+- `roles/iam.serviceAccountUser` on the Compute Engine default service account, granted to the Reasoning Engine service agent (the job runs as the compute SA, so the trigger needs `actAs`)
+
+## 2a. Workloads & Environment Variables
+
+| Workload | Entry point | Key environment variables |
+| :--- | :--- | :--- |
+| Agent Runtime (Reasoning Engine) | `app/agent.py` (`root_agent`) | `GEMINI_MODEL`, `MANAGED_AGENT_MODEL`, `MANAGED_AGENT_DEADLINE_SECONDS`, `GENERATION_JOB_NAME` (`projects/<p>/locations/<r>/jobs/<job>`), `GENERATION_TRIGGER_MODE` (`auto` \| `cloud_run_job` \| `inline_thread` \| `sync` \| `none`), `GENERATION_STALE_MINUTES` (default 13), `HOSTING_BASE_URL`, `PROPOSAL_GCS_BUCKET`, `PROPOSAL_FIRESTORE_COLLECTION`, `AGENT_SEARCH_DATASTORE_ID` |
+| Cloud Run job (`proposal-deck-generator`) | `uv run --no-sync python -m app.generation_worker` (reads `PRESENTATION_ID`) | Same model / storage variables as the agent; `--task-timeout=1500s`, `--max-retries=1`, runs as the compute SA |
+| Cloud Run service (hosting gateway) | `hosting_gateway/main.py` | `PROPOSAL_GCS_BUCKET`, `PROPOSAL_FIRESTORE_COLLECTION`, `GATEWAY_SESSION_SECRET`, `PROPOSAL_COOKIE_PREFIX`, `PROPOSAL_BRAND_NAME`, `PROPOSAL_BRAND_BADGE` |
+
+### Gateway endpoints
+
+| Endpoint | Auth | Behaviour |
+| :--- | :--- | :--- |
+| `GET /p/{id}` | Basic auth or session cookie | `generating` → branded interim page (HTTP 200, polls `/status`); `failed` → HTTP 503; `ready` → streams `presentations/{id}/index.html` from private GCS; revoked/expired → HTTP 403 |
+| `GET /p/{id}/status` | Basic auth or session cookie | JSON (`generation_status`, `generation_phase`, `generation_detail`, `generation_engine`, `generation_engine_label`, `ready_at`, …), `Cache-Control: no-store, private` |
+| `POST /p/{id}/auth` | Login form | Verifies PBKDF2 credentials and sets the HMAC session cookie |
+| `GET /health` | none | Liveness (`/healthz` is reserved by the Google Frontend on `*.run.app`) |
 
 ## 3. Custom Domain Options
 

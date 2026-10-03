@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import base64
 import datetime
 import sys
 from pathlib import Path
@@ -32,6 +33,7 @@ sys.path.insert(0, str(ROOT_DIR))
 from app.agent import (  # noqa: E402
     ArchitectureNode,
     ChallengeItem,
+    create_proposal_website,
     CxHighlight,
     PresentationDeckSpec,
     RoadmapPhase,
@@ -540,3 +542,427 @@ def test_genai_location_routing_and_global_fallback() -> None:
         assert deck_out.theme_color == "emerald"
 
 
+def _make_fake_backends() -> dict[str, Any]:
+    """In-memory stand-ins for google.cloud.storage.Client / google.cloud.firestore.Client."""
+    gcs_store: dict[str, bytes] = {}
+    firestore_store: dict[str, dict[str, Any]] = {}
+    access_logs_store: dict[str, list[dict[str, Any]]] = {}
+
+    def _make_mock_storage_client(*args: Any, **kwargs: Any) -> MagicMock:
+        client = MagicMock()
+
+        def _get_bucket(bname: str) -> MagicMock:
+            bucket = MagicMock()
+
+            def _get_blob(bpath: str) -> MagicMock:
+                blob = MagicMock()
+                key = f"{bname}/{bpath}"
+                blob.upload_from_string.side_effect = (
+                    lambda data, content_type=None: gcs_store.__setitem__(
+                        key, data if isinstance(data, bytes) else data.encode("utf-8")
+                    )
+                )
+                blob.download_as_bytes.side_effect = lambda: gcs_store[key]
+                blob.download_as_text.side_effect = (
+                    lambda encoding="utf-8": gcs_store[key].decode(encoding)
+                )
+                blob.exists.side_effect = lambda: key in gcs_store
+                blob.delete.side_effect = lambda: gcs_store.pop(key, None)
+                return blob
+
+            bucket.blob.side_effect = _get_blob
+            return bucket
+
+        client.bucket.side_effect = _get_bucket
+        return client
+
+    def _make_mock_firestore_client(*args: Any, **kwargs: Any) -> MagicMock:
+        client = MagicMock()
+
+        def _get_collection(cname: str) -> MagicMock:
+            col = MagicMock()
+
+            def _get_doc_ref(doc_id: str) -> MagicMock:
+                doc_ref = MagicMock()
+                doc_ref.id = doc_id
+
+                def _get_snap() -> MagicMock:
+                    snap = MagicMock()
+                    snap.id = doc_id
+                    snap.exists = doc_id in firestore_store
+                    snap.to_dict.side_effect = lambda: dict(firestore_store.get(doc_id, {}))
+                    return snap
+
+                doc_ref.get.side_effect = _get_snap
+                doc_ref.set.side_effect = lambda data: firestore_store.__setitem__(doc_id, dict(data))
+                doc_ref.update.side_effect = lambda updates: firestore_store[doc_id].update(updates)
+
+                def _get_subcol(subname: str) -> MagicMock:
+                    subcol = MagicMock()
+                    logs = access_logs_store.setdefault(doc_id, [])
+
+                    def _stream_logs() -> list[MagicMock]:
+                        out = []
+                        for entry in logs:
+                            m = MagicMock()
+                            m.to_dict.return_value = dict(entry)
+                            out.append(m)
+                        return out
+
+                    subcol.stream.side_effect = _stream_logs
+                    return subcol
+
+                doc_ref.collection.side_effect = _get_subcol
+                return doc_ref
+
+            col.document.side_effect = _get_doc_ref
+
+            def _stream_docs() -> list[MagicMock]:
+                out = []
+                for did, ddata in firestore_store.items():
+                    m = MagicMock()
+                    m.id = did
+                    m.to_dict.return_value = dict(ddata)
+                    out.append(m)
+                return out
+
+            col.stream.side_effect = _stream_docs
+            return col
+
+        client.collection.side_effect = _get_collection
+        return client
+
+    return {
+        "storage_factory": _make_mock_storage_client,
+        "firestore_factory": _make_mock_firestore_client,
+        "gcs": gcs_store,
+        "firestore": firestore_store,
+        "access_logs": access_logs_store,
+    }
+
+
+_FREE_FORM_OUTLINE_JSON = (
+    '{"slides": [{"slide_type": "cover", "title": "統合CDPによる顧客体験変革"},'
+    ' {"slide_type": "challenges", "bullets": ["データ分断", "施策の属人化", "工数肥大"]}],'
+    ' "theme_color": "sky"}'
+)
+
+
+def test_create_proposal_website_with_free_form_outline_issues_credentials_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the GE stall: a non-conforming deck_spec_json must never raise; credentials are issued first."""
+    from app.agent import get_proposal_status
+    from app.generation_worker import generate_presentation
+
+    backends = _make_fake_backends()
+    monkeypatch.setenv("GENERATION_TRIGGER_MODE", "none")
+    monkeypatch.setenv("ENABLE_MANAGED_AGENTS_API", "false")
+    monkeypatch.delenv("GENERATION_JOB_NAME", raising=False)
+    mock_ctx = MagicMock()
+    mock_ctx.state = {}
+
+    class _OfflineGenAIClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.models = MagicMock()
+            self.models.generate_content.side_effect = RuntimeError("offline unit test")
+
+    with (
+        patch("google.cloud.storage.Client", side_effect=backends["storage_factory"]),
+        patch("google.cloud.firestore.Client", side_effect=backends["firestore_factory"]),
+        patch("app.agent.genai.Client", _OfflineGenAIClient),
+    ):
+        created = create_proposal_website(
+            client_name="株式会社サンプル商事",
+            proposal_title="統合CDP×AIコンシェルジュによる顧客体験変革",
+            proposal_brief="会員・EC・店舗データを統合し、AIで1to1接客を実現する",
+            theme_color="sky",
+            deck_spec_json=_FREE_FORM_OUTLINE_JSON,
+            tool_context=mock_ctx,
+        )
+        # 1. Immediate issue of URL / ID / password while generation is pending
+        assert created["status"] == "GENERATING"
+        assert created["generation_status"] == "generating"
+        pres_id = created["presentation_id"]
+        assert created["share_url"].endswith(f"/p/{pres_id}")
+        assert created["viewer_id"].startswith("client-")
+        assert len(created["viewer_password"]) >= 12
+        assert created["outline_hint_applied"] is True
+        doc = backends["firestore"][pres_id]
+        assert doc["generation_status"] == "generating"
+        assert doc["status"] == "active" and doc["is_active"] is True
+        assert "統合CDPによる顧客体験変革" in doc["generation_inputs"]["outline_hint"]
+        assert not backends["gcs"]  # nothing rendered yet
+        assert mock_ctx.state["published_result"]["presentation_id"] == pres_id
+
+        # 2. Status tool reports generating (no stale repair yet)
+        status_before = get_proposal_status(pres_id)
+        assert status_before["generation_status"] == "generating"
+        assert status_before["stale_repair_applied"] is False
+
+        # 3. Background worker finalizes (offline -> deterministic tier) and flips to ready
+        worker_result = generate_presentation(pres_id)
+        assert worker_result["generation_status"] == "ready"
+        assert worker_result["generation_engine"].startswith("deterministic_skill_template")
+        doc = backends["firestore"][pres_id]
+        assert doc["generation_status"] == "ready"
+        assert doc["deck_spec"]["client_name"] == "株式会社サンプル商事"
+        html = next(iter(backends["gcs"].values())).decode("utf-8")
+        assert validate_rendered_html(html) is True
+        assert "株式会社サンプル商事" in html
+
+        # 4. Status tool now reports ready with a human-readable engine label
+        status_after = get_proposal_status(pres_id)
+        assert status_after["generation_status"] == "ready"
+        assert "テンプレート" in status_after["generation_engine_label"]
+
+        # 5. Worker is idempotent-ish: a second run on a ready doc keeps it ready
+        again = generate_presentation(pres_id)
+        assert again["generation_status"] == "ready"
+
+        # 6. Listing exposes generation fields
+        listed = list_proposal_websites(client_filter="サンプル商事")
+        assert listed["presentations"][0]["generation_status"] == "ready"
+
+
+def test_get_proposal_status_repairs_stale_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.agent import get_proposal_status
+
+    backends = _make_fake_backends()
+    stale_requested = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30)
+    ).isoformat()
+    pres_id = "prop-20261003-stale001"
+    backends["firestore"][pres_id] = {
+        "presentation_id": pres_id,
+        "viewer_id": "client-stale-0001",
+        "password_hash": "x",
+        "password_salt": "y",
+        "gcs_bucket": "test-bucket",
+        "gcs_blob_path": f"presentations/{pres_id}/index.html",
+        "client_name": "株式会社サンプル商事",
+        "proposal_title": "ご提案",
+        "theme_color": "violet",
+        "status": "active",
+        "is_active": True,
+        "generation_status": "generating",
+        "generation_phase": "managed_agents",
+        "generation_requested_at": stale_requested,
+        "generation_inputs": {
+            "client_name": "株式会社サンプル商事",
+            "proposal_title": "ご提案",
+            "proposal_brief": "概要",
+            "theme_color": "violet",
+        },
+    }
+    monkeypatch.setenv("GENERATION_STALE_MINUTES", "13")
+    with (
+        patch("google.cloud.storage.Client", side_effect=backends["storage_factory"]),
+        patch("google.cloud.firestore.Client", side_effect=backends["firestore_factory"]),
+    ):
+        status = get_proposal_status(pres_id)
+    assert status["stale_repair_applied"] is True
+    assert status["generation_status"] == "ready"
+    assert status["generation_engine"].startswith("deterministic_skill_template:stale_after_")
+    assert backends["firestore"][pres_id]["generation_status"] == "ready"
+    html = backends["gcs"][f"test-bucket/presentations/{pres_id}/index.html"].decode("utf-8")
+    assert 'data-theme="violet"' in html
+
+
+def test_tools_return_error_payloads_instead_of_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.agent import get_proposal_status
+
+    backends = _make_fake_backends()
+    monkeypatch.setenv("GENERATION_TRIGGER_MODE", "none")
+    with (
+        patch("google.cloud.storage.Client", side_effect=backends["storage_factory"]),
+        patch("google.cloud.firestore.Client", side_effect=backends["firestore_factory"]),
+    ):
+        assert create_proposal_website()["status"] == "ERROR"
+        assert edit_proposal_website("prop-missing", "タイトル変更")["status"] == "NOT_FOUND"
+        assert get_proposal_access_logs("prop-missing")["status"] == "NOT_FOUND"
+        assert manage_proposal_credentials("prop-missing")["status"] == "NOT_FOUND"
+        assert delete_proposal_website("prop-missing")["status"] == "NOT_FOUND"
+        assert get_proposal_status("prop-missing")["status"] == "NOT_FOUND"
+
+        # Editing while generating is refused gracefully
+        backends["firestore"]["prop-gen"] = {
+            "presentation_id": "prop-gen",
+            "generation_status": "generating",
+            "generation_phase": "managed_agents",
+        }
+        res = edit_proposal_website("prop-gen", "色を変えて")
+        assert res["status"] == "GENERATING"
+
+    # A storage outage inside the fast path surfaces as ERROR, not an exception
+    spec = _sample_deck_spec()
+    with (
+        patch("google.cloud.storage.Client", side_effect=RuntimeError("gcs down")),
+        patch("google.cloud.firestore.Client", side_effect=backends["firestore_factory"]),
+    ):
+        res = create_proposal_website(deck_spec_json=spec.model_dump_json())
+        assert res["status"] == "ERROR"
+        assert res["error_type"] == "RuntimeError"
+
+
+def test_gateway_generating_page_status_endpoint_and_auto_switch() -> None:
+    spec = _sample_deck_spec()
+    html_bytes = render_deck_html(spec).encode("utf-8")
+    pw = "TestPass-654321"
+    pw_hash, pw_salt = hash_password(pw)
+    pres_id = "prop-20261003-gen00001"
+    viewer_id = "client-sample-cd34"
+    fake_doc: dict[str, Any] = {
+        "presentation_id": pres_id,
+        "viewer_id": viewer_id,
+        "password_hash": pw_hash,
+        "password_salt": pw_salt,
+        "gcs_bucket": "test-bucket",
+        "gcs_blob_path": f"presentations/{pres_id}/index.html",
+        "client_name": spec.client_name,
+        "proposal_title": spec.proposal_title,
+        "expires_at": (
+            datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=7)
+        ).isoformat(),
+        "status": "active",
+        "is_active": True,
+        "generation_status": "generating",
+        "generation_phase": "managed_agents",
+        "generation_requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    gcs_calls: list[str] = []
+
+    def _fake_fetch(bucket: str, path: str) -> bytes:
+        gcs_calls.append(path)
+        return html_bytes
+
+    with (
+        patch.object(gateway_main, "_get_firestore_doc", side_effect=lambda _: fake_doc),
+        patch.object(gateway_main, "_fetch_html_from_gcs", side_effect=_fake_fetch),
+        patch.object(gateway_main, "_record_access_log", side_effect=lambda *a, **k: None),
+    ):
+        client = TestClient(gateway_main.app)
+        good_b64 = base64.b64encode(f"{viewer_id}:{pw}".encode()).decode()
+
+        # Unauthenticated status -> 401 JSON (never leaks state)
+        assert client.get(f"/p/{pres_id}/status").status_code == 401
+
+        # Authenticated page while generating -> 200 interim page with polling script, GCS untouched
+        r_gen = client.get(f"/p/{pres_id}", headers={"Authorization": f"Basic {good_b64}"})
+        assert r_gen.status_code == 200
+        assert "AIが提案プレゼンテーションを生成しています" in r_gen.text
+        assert f"/p/{pres_id}/status" in r_gen.text or "/status?ts=" in r_gen.text
+        assert "location.reload()" in r_gen.text
+        assert gcs_calls == []
+        cookie_key = gateway_main._get_cookie_name(pres_id)
+        assert cookie_key in r_gen.cookies
+
+        # Cookie-authenticated status endpoint -> JSON generating
+        client.cookies.set(cookie_key, r_gen.cookies[cookie_key])
+        r_status = client.get(f"/p/{pres_id}/status")
+        assert r_status.status_code == 200
+        assert r_status.headers["cache-control"] == "no-store, private"
+        assert r_status.json()["generation_status"] == "generating"
+        assert r_status.json()["generation_phase"] == "managed_agents"
+
+        # Worker flips Firestore to ready -> status says ready and the same URL now streams the deck
+        fake_doc["generation_status"] = "ready"
+        fake_doc["generation_engine"] = "managed_agents_api:antigravity-preview-05-2026"
+        assert client.get(f"/p/{pres_id}/status").json()["generation_status"] == "ready"
+        r_ready = client.get(f"/p/{pres_id}")
+        assert r_ready.status_code == 200
+        assert spec.client_name in r_ready.text
+        assert gcs_calls == [f"presentations/{pres_id}/index.html"]
+
+        # Failed generation -> 503 explanatory page
+        fake_doc["generation_status"] = "failed"
+        fake_doc["generation_error"] = "boom"
+        r_failed = client.get(f"/p/{pres_id}")
+        assert r_failed.status_code == 503
+        assert "生成に失敗しました" in r_failed.text
+
+
+def test_managed_agents_tier_polls_parses_fenced_json_and_falls_back_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.agent import synthesize_deck_spec_with_skill
+
+    monkeypatch.setenv("ENABLE_MANAGED_AGENTS_API", "true")
+    monkeypatch.setenv("MANAGED_AGENT_POLL_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("GENAI_LOCATION", "global")
+    valid_json = _sample_deck_spec(theme_color="amber").model_dump_json()
+    calls: dict[str, Any] = {"create": [], "get": 0, "cancel": 0, "generate": 0}
+
+    class _Interaction:
+        def __init__(self, status: str, output_text: str = "") -> None:
+            self.id = "int-123"
+            self.status = status
+            self.output_text = output_text
+            self.errors = None
+
+    class _InteractionsAPI:
+        def __init__(self, mode: str) -> None:
+            self.mode = mode
+            self.polls = 0
+
+        def create(self, **kwargs: Any) -> _Interaction:
+            calls["create"].append(kwargs)
+            return _Interaction("in_progress")
+
+        def get(self, interaction_id: str, **kwargs: Any) -> _Interaction:
+            calls["get"] += 1
+            self.polls += 1
+            if self.mode == "hang":
+                return _Interaction("in_progress")
+            if self.polls < 2:
+                return _Interaction("in_progress")
+            return _Interaction("completed", "設計が完了しました。\n```json\n" + valid_json + "\n```")
+
+        def cancel(self, interaction_id: str) -> None:
+            calls["cancel"] += 1
+
+    class _Models:
+        def generate_content(self, **kwargs: Any) -> Any:
+            calls["generate"] += 1
+            m = MagicMock()
+            m.text = valid_json
+            return m
+
+    mode_holder = {"mode": "ok"}
+
+    class _FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.interactions = _InteractionsAPI(mode_holder["mode"])
+            self.models = _Models()
+
+    with patch("app.agent.genai.Client", _FakeClient):
+        # (a) Managed Agents completes -> parsed from fenced JSON, correct request shape
+        deck, engine = synthesize_deck_spec_with_skill(
+            client_name="株式会社サンプル商事",
+            proposal_title="提案",
+            proposal_brief="概要",
+            theme_color="amber",
+            outline_hint="スライド2は3つの課題",
+        )
+        assert engine == "managed_agents_api:antigravity-preview-05-2026"
+        assert deck.theme_color == "amber"
+        req = calls["create"][0]
+        assert req["agent"] == "antigravity-preview-05-2026"
+        assert req["background"] is True and req["store"] is True and req["stream"] is False
+        assert req["environment"] == {"type": "remote"}
+        assert "スライド2は3つの課題" in req["input"]
+        assert "config" not in req  # the old (broken) kwarg must never be sent
+        assert calls["generate"] == 0
+
+        # (b) Managed Agents exceeds the time budget -> cancelled, fast Gemini tier used
+        mode_holder["mode"] = "hang"
+        deck2, engine2 = synthesize_deck_spec_with_skill(
+            client_name="株式会社サンプル商事",
+            proposal_title="提案",
+            proposal_brief="概要",
+            theme_color="rose",
+            managed_agent_deadline_seconds=1,
+        )
+    assert engine2.startswith("agent_platform_gemini_with_skill:")
+    assert deck2.theme_color == "rose"
+    assert calls["cancel"] >= 1

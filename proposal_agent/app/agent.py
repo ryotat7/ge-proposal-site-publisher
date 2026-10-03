@@ -24,7 +24,10 @@ import logging
 import os
 import re
 import secrets
+import threading
+import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -491,17 +494,75 @@ def _default_deck_spec_from_brief(
     )
 
 
-def synthesize_deck_spec_with_skill(
+def _managed_agents_enabled() -> bool:
+    return os.environ.get("ENABLE_MANAGED_AGENTS_API", "true").lower() in ("true", "1")
+
+
+def _get_managed_agent_deadline_seconds() -> int:
+    """Time budget for the Managed Agents API phase before falling back (default 600s = 10 min)."""
+    try:
+        return max(30, int(os.environ.get("MANAGED_AGENT_DEADLINE_SECONDS", "600")))
+    except ValueError:
+        return 600
+
+
+def _get_managed_agent_poll_interval_seconds() -> float:
+    try:
+        return max(0.0, float(os.environ.get("MANAGED_AGENT_POLL_INTERVAL_SECONDS", "8")))
+    except ValueError:
+        return 8.0
+
+
+def _get_fast_model_timeout_seconds() -> int:
+    try:
+        return max(30, int(os.environ.get("FAST_MODEL_TIMEOUT_SECONDS", "180")))
+    except ValueError:
+        return 180
+
+
+def _strip_code_fences(text: str) -> str:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json|JSON)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _extract_json_object_text(text: str) -> str:
+    """Returns the outermost JSON object substring of a free-form LLM answer (or the stripped text)."""
+    cleaned = _strip_code_fences(text)
+    if cleaned.startswith("{") and cleaned.endswith("}"):
+        return cleaned
+    fenced = re.search(r"```(?:json|JSON)?\s*(\{.*\})\s*```", text or "", flags=re.DOTALL)
+    if fenced:
+        return fenced.group(1).strip()
+    first = cleaned.find("{")
+    last = cleaned.rfind("}")
+    if first != -1 and last > first:
+        return cleaned[first : last + 1]
+    return cleaned
+
+
+def parse_deck_spec_text(raw_text: str, theme_color: str = "sky") -> PresentationDeckSpec:
+    """Parses an LLM answer (possibly fenced / with prose) into a validated PresentationDeckSpec."""
+    deck_obj = PresentationDeckSpec.model_validate_json(_extract_json_object_text(raw_text))
+    deck_obj.theme_color = theme_color if theme_color in SUPPORTED_THEME_COLORS else "sky"
+    return deck_obj
+
+
+def _build_synthesis_prompt(
     client_name: str,
     proposal_title: str,
     proposal_brief: str,
-    theme_color: str = "sky",
-    knowledge_context: str = "",
-) -> tuple[PresentationDeckSpec, str]:
-    """Synthesizes a 6-slide PresentationDeckSpec guided by interactive-slide-designer skill."""
-    skill_text = load_interactive_slide_designer_skill()
-    theme = theme_color if theme_color in SUPPORTED_THEME_COLORS else "sky"
-    prompt = f"""あなたはエグゼクティブ提案デザイナーです。
+    theme: str,
+    knowledge_context: str,
+    outline_hint: str,
+    skill_text: str,
+) -> str:
+    outline_block = (
+        f"\n【ユーザーと合意済みの構成メモ（優先して反映）】:\n{outline_hint}\n" if outline_hint else ""
+    )
+    return f"""あなたはエグゼクティブ提案デザイナーです。
 以下の `interactive-slide-designer` スキル定義と社内ナレッジ検索結果に基づき、
 提案先クライアント専用の全6枚インタラクティブHTML5プレゼンテーション構成（`PresentationDeckSpec`）を作成してください。
 
@@ -509,57 +570,147 @@ def synthesize_deck_spec_with_skill(
 【提案タイトル】: {proposal_title}
 【提案ブリーフ・要望】: {proposal_brief}
 【希望テーマカラー】: {theme}
-
+{outline_block}
 【社内ナレッジ検索結果】:
 {knowledge_context}
 
 【適用スキル (interactive-slide-designer)】:
 {skill_text}
 """
+
+
+_MANAGED_AGENT_OUTPUT_CONTRACT = """
+【出力契約（厳守）】
+- 最終回答は `PresentationDeckSpec` JSON オブジェクト **1つのみ** を返してください（前置き・解説・Markdown見出し禁止。```json フェンスは可）。
+- ファイルの作成やコード実行は不要です。思考・下書きは内部で行い、最終メッセージには JSON だけを出力してください。
+- 配列の要素数はスキーマどおり厳密に守ってください（current_challenges=3, before_state=3, after_state=3, cx_highlights=3, architecture_nodes=4, roadmap_phases=3, quantitative_roi=3, qualitative_roi=3, next_steps=3）。
+- すべての文章は自然で説得力のある日本語で、クライアント固有の文脈（業界・課題・固有名詞）を反映してください。
+
+【JSON Schema】
+"""
+
+_MANAGED_AGENT_TERMINAL_STATUSES = {
+    "completed",
+    "failed",
+    "cancelled",
+    "canceled",
+    "incomplete",
+    "requires_action",
+    "errored",
+    "error",
+}
+
+
+def _synthesize_via_managed_agents(
+    prompt: str,
+    theme: str,
+    deadline_seconds: int,
+    status_callback: Callable[[str, str], None] | None = None,
+) -> tuple[PresentationDeckSpec | None, str, dict[str, Any]]:
+    """Runs the Antigravity base agent through the Managed Agents API (Interactions API, locations/global).
+
+    Uses `background=True` + polling with a hard deadline so a slow/hung sandbox can never block publication.
+    Returns (deck_or_None, raw_output_text, meta).
+    """
     project_id = _get_project_id()
-    active_model = _get_model_name()
-    genai_location = _get_genai_location(active_model)
+    client = genai.Client(vertexai=True, project=project_id, location="global")
+    interactions_api = getattr(client, "interactions", None)
+    if interactions_api is None or not hasattr(interactions_api, "create"):
+        raise RuntimeError("google-genai SDK without Interactions API support")
 
-    if os.environ.get("ENABLE_MANAGED_AGENTS_API", "true").lower() in ("true", "1"):
-        try:
-            global_client = genai.Client(
-                vertexai=True, project=project_id, location="global"
+    full_prompt = (
+        prompt
+        + _MANAGED_AGENT_OUTPUT_CONTRACT
+        + json.dumps(PresentationDeckSpec.model_json_schema(), ensure_ascii=False)
+    )
+    started = time.monotonic()
+    interaction = interactions_api.create(
+        agent=MANAGED_AGENT_MODEL,
+        input=full_prompt,
+        environment={"type": "remote"},
+        background=True,
+        store=True,
+        stream=False,
+        timeout=120,
+    )
+    interaction_id = str(getattr(interaction, "id", "") or "")
+    if status_callback:
+        status_callback("managed_agents", f"interaction={interaction_id} started")
+    logger.info("Managed Agents interaction %s started (deadline=%ss)", interaction_id, deadline_seconds)
+
+    final = interaction
+    poll_interval = _get_managed_agent_poll_interval_seconds()
+    polls = 0
+    while True:
+        status = str(getattr(final, "status", "") or "").lower()
+        if status in _MANAGED_AGENT_TERMINAL_STATUSES:
+            break
+        elapsed = time.monotonic() - started
+        if elapsed > deadline_seconds:
+            try:
+                interactions_api.cancel(interaction_id)
+            except Exception as cancel_exc:  # noqa: BLE001
+                logger.info("Managed Agents cancel skipped: %s", cancel_exc)
+            raise TimeoutError(
+                f"Managed Agents interaction {interaction_id} exceeded {deadline_seconds}s (status={status})"
             )
-            interactions_api = getattr(global_client, "interactions", None)
-            if interactions_api and hasattr(interactions_api, "create"):
-                interaction_resp = interactions_api.create(
-                    model=MANAGED_AGENT_MODEL,
-                    input=prompt,
-                    config={
-                        "response_mime_type": "application/json",
-                        "response_schema": PresentationDeckSpec.model_json_schema(),
-                    },
-                )
-                raw_text = getattr(interaction_resp, "output_text", None) or str(
-                    interaction_resp
-                )
-                deck_obj = PresentationDeckSpec.model_validate_json(raw_text)
-                deck_obj.theme_color = theme
-                return deck_obj, f"managed_agents_api:{MANAGED_AGENT_MODEL}"
-        except Exception as exc:
-            logger.info(
-                "Managed Agents API (%s) fallback to Agent Platform Gemini (%s): %s",
-                MANAGED_AGENT_MODEL,
-                active_model,
-                exc,
+        if poll_interval:
+            time.sleep(poll_interval)
+        polls += 1
+        final = interactions_api.get(interaction_id, timeout=60)
+        if status_callback and polls % 4 == 0:
+            status_callback(
+                "managed_agents",
+                f"interaction={interaction_id} status={getattr(final, 'status', '')} elapsed={int(time.monotonic() - started)}s",
             )
 
+    elapsed_total = time.monotonic() - started
+    status = str(getattr(final, "status", "") or "").lower()
+    meta = {
+        "interaction_id": interaction_id,
+        "status": status,
+        "elapsed_seconds": round(elapsed_total, 1),
+    }
+    if status != "completed":
+        raise RuntimeError(
+            f"Managed Agents interaction {interaction_id} ended with status={status} errors={getattr(final, 'errors', None)}"
+        )
+    raw_text = str(getattr(final, "output_text", "") or "")
+    if not raw_text:
+        raise RuntimeError(f"Managed Agents interaction {interaction_id} completed without text output")
+    try:
+        return parse_deck_spec_text(raw_text, theme), raw_text, meta
+    except Exception as parse_exc:  # noqa: BLE001
+        logger.info("Managed Agents output needs schema repair: %s", parse_exc)
+        return None, raw_text, meta
+
+
+def _synthesize_via_gemini(
+    prompt: str,
+    theme: str,
+    model_name: str,
+    timeout_seconds: int,
+    status_callback: Callable[[str, str], None] | None = None,
+) -> tuple[PresentationDeckSpec, str]:
+    """Structured-output synthesis with the fast Gemini model (regional endpoint, then global)."""
+    project_id = _get_project_id()
+    genai_location = _get_genai_location(model_name)
     candidate_locations = [genai_location]
     if "global" not in candidate_locations:
         candidate_locations.append("global")
-
+    last_exc: Exception | None = None
     for loc in candidate_locations:
         try:
             client = genai.Client(
-                vertexai=True, project=project_id, location=loc
+                vertexai=True,
+                project=project_id,
+                location=loc,
+                http_options=types.HttpOptions(timeout=timeout_seconds * 1000),
             )
+            if status_callback:
+                status_callback("gemini_fast", f"model={model_name} location={loc}")
             resp = client.models.generate_content(
-                model=active_model,
+                model=model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -568,14 +719,127 @@ def synthesize_deck_spec_with_skill(
                 ),
             )
             if resp.text:
-                deck_obj = PresentationDeckSpec.model_validate_json(resp.text)
-                deck_obj.theme_color = theme
-                return deck_obj, f"agent_platform_gemini_with_skill:{active_model}"
-        except Exception as exc:
+                return parse_deck_spec_text(resp.text, theme), f"{model_name}@{loc}"
+            raise RuntimeError("empty response text")
+        except TypeError:
+            # Fake/legacy clients without http_options support (unit tests) – retry without it.
+            try:
+                client = genai.Client(vertexai=True, project=project_id, location=loc)
+                resp = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=PresentationDeckSpec,
+                        temperature=0.25,
+                    ),
+                )
+                if resp.text:
+                    return parse_deck_spec_text(resp.text, theme), f"{model_name}@{loc}"
+                raise RuntimeError("empty response text")
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                logger.warning("Gemini structured synthesis (%s at %s) failed: %s", model_name, loc, exc)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.warning("Gemini structured synthesis (%s at %s) failed: %s", model_name, loc, exc)
+    raise RuntimeError(f"Gemini synthesis failed on {candidate_locations}: {last_exc}")
+
+
+def _repair_deck_with_gemini(
+    raw_text: str,
+    theme: str,
+    model_name: str,
+    timeout_seconds: int,
+    status_callback: Callable[[str, str], None] | None = None,
+) -> PresentationDeckSpec:
+    """Normalizes a creative but non-conforming draft into the strict PresentationDeckSpec schema."""
+    repair_prompt = f"""以下は提案プレゼンテーション構成の下書き（JSONまたは自由記述）です。
+内容・固有名詞・数値をできる限り保持したまま、スキーマに**厳密に**適合する `PresentationDeckSpec` JSON に整形してください。
+要素数の不足は文脈に沿って補完し、超過分は重要度の高い順に絞り込んでください。希望テーマカラーは `{theme}` です。
+
+【下書き】:
+{raw_text[:20000]}
+"""
+    if status_callback:
+        status_callback("managed_agents_repair", f"schema repair with {model_name}")
+    deck, _ = _synthesize_via_gemini(repair_prompt, theme, model_name, timeout_seconds)
+    return deck
+
+
+def synthesize_deck_spec_with_skill(
+    client_name: str,
+    proposal_title: str,
+    proposal_brief: str,
+    theme_color: str = "sky",
+    knowledge_context: str = "",
+    outline_hint: str = "",
+    managed_agent_deadline_seconds: int | None = None,
+    status_callback: Callable[[str, str], None] | None = None,
+) -> tuple[PresentationDeckSpec, str]:
+    """Synthesizes a 6-slide PresentationDeckSpec guided by the interactive-slide-designer skill.
+
+    Tiered strategy (each tier is time-boxed so publication is always guaranteed):
+      1. Managed Agents API (`antigravity-preview-05-2026`, locations/global) within `MANAGED_AGENT_DEADLINE_SECONDS`
+         (default 10 min). Non-conforming output is schema-repaired with the fast Gemini model.
+      2. Fast Gemini structured output (`GEMINI_MODEL`, default gemini-3.8-flash).
+      3. Deterministic skill template (offline / last resort).
+    Returns (deck_spec, engine_used).
+    """
+    skill_text = load_interactive_slide_designer_skill()
+    theme = theme_color if theme_color in SUPPORTED_THEME_COLORS else "sky"
+    prompt = _build_synthesis_prompt(
+        client_name=client_name,
+        proposal_title=proposal_title,
+        proposal_brief=proposal_brief,
+        theme=theme,
+        knowledge_context=knowledge_context,
+        outline_hint=outline_hint,
+        skill_text=skill_text,
+    )
+    fast_model = _get_model_name()
+    fast_timeout = _get_fast_model_timeout_seconds()
+    deadline = managed_agent_deadline_seconds or _get_managed_agent_deadline_seconds()
+
+    # 1. Managed Agents API (Antigravity harness) with hard deadline
+    if _managed_agents_enabled():
+        try:
+            deck_obj, raw_text, meta = _synthesize_via_managed_agents(
+                prompt, theme, deadline, status_callback
+            )
+            if deck_obj is not None:
+                return deck_obj, f"managed_agents_api:{MANAGED_AGENT_MODEL}"
+            try:
+                repaired = _repair_deck_with_gemini(
+                    raw_text, theme, fast_model, fast_timeout, status_callback
+                )
+                return repaired, f"managed_agents_api:{MANAGED_AGENT_MODEL}+schema_repair:{fast_model}"
+            except Exception as repair_exc:  # noqa: BLE001
+                logger.warning(
+                    "Managed Agents output (%s) could not be repaired, falling back: %s",
+                    meta.get("interaction_id"),
+                    repair_exc,
+                )
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Gemini structured synthesis failed on location=%s: %s", loc, exc
+                "Managed Agents API (%s) fallback to %s: %s",
+                MANAGED_AGENT_MODEL,
+                fast_model,
+                exc,
             )
 
+    # 2. Fast Gemini structured output with skill instructions
+    try:
+        deck_obj, _ = _synthesize_via_gemini(
+            prompt, theme, fast_model, fast_timeout, status_callback
+        )
+        return deck_obj, f"agent_platform_gemini_with_skill:{fast_model}"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Gemini structured synthesis fallback triggered: %s", exc)
+
+    # 3. Deterministic fallback (e.g. unit test environment without external network)
+    if status_callback:
+        status_callback("deterministic_template", "offline template synthesis")
     return (
         _default_deck_spec_from_brief(
             client_name=client_name,
@@ -585,6 +849,23 @@ def synthesize_deck_spec_with_skill(
         ),
         "deterministic_skill_template",
     )
+
+
+def describe_generation_engine(engine: str) -> str:
+    """Human-readable Japanese label for a `generation_engine` value stored in Firestore."""
+    eng = (engine or "").lower()
+    if eng.startswith("managed_agents_api"):
+        label = "Managed Agents API（Antigravity ハーネス）で生成"
+        if "schema_repair" in eng:
+            label += "（スキーマ整形は gemini-3.8-flash が補助）"
+        return label
+    if eng.startswith("agent_platform_gemini_with_skill"):
+        return "gemini-3.8-flash 高速生成（Managed Agents API が時間予算超過または失敗したため自動切替）"
+    if eng.startswith("deterministic_skill_template"):
+        return "スキルテンプレートによる即時生成（オフライン／最終フォールバック）"
+    if eng == "state_deck_spec":
+        return "対話で確定した構成データをそのまま反映"
+    return engine or "不明"
 
 
 # ---------------------------------------------------------------------------
@@ -707,12 +988,151 @@ def _extract_deck_dict_from_state(raw_deck: Any) -> dict[str, Any]:
     if isinstance(raw_deck, dict):
         return raw_deck
     if isinstance(raw_deck, str):
-        cleaned = raw_deck.strip()
-        if cleaned.startswith("```"):
-            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-            cleaned = re.sub(r"\s*```$", "", cleaned)
-        return json.loads(cleaned)
+        return json.loads(_strip_code_fences(raw_deck))
     raise ValueError(f"Unsupported deck_spec format: {type(raw_deck)}")
+
+
+def _coerce_deck_spec(
+    raw_spec: Any, theme_color: str
+) -> tuple[PresentationDeckSpec | None, str]:
+    """Returns (valid_deck_or_None, outline_hint_text).
+
+    The LLM sometimes passes a free-form outline (e.g. a dict with `slides`) instead of a
+    schema-compliant PresentationDeckSpec. Instead of raising (which previously aborted the
+    whole agent turn), the non-conforming payload is preserved as an outline hint for synthesis.
+    """
+    if not raw_spec:
+        return None, ""
+    try:
+        deck_dict = _extract_deck_dict_from_state(raw_spec)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("deck_spec is not JSON; treating as free-form outline hint: %s", exc)
+        return None, str(raw_spec)[:6000]
+    if isinstance(deck_dict, dict) and theme_color in SUPPORTED_THEME_COLORS:
+        deck_dict.setdefault("theme_color", theme_color)
+    try:
+        return PresentationDeckSpec.model_validate(deck_dict), ""
+    except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "deck_spec failed schema validation; using it as outline hint instead: %s",
+            str(exc)[:300],
+        )
+        return None, json.dumps(deck_dict, ensure_ascii=False)[:6000]
+
+
+def _get_generation_trigger_mode() -> str:
+    """auto (Cloud Run Job -> inline thread), cloud_run_job, inline_thread, sync, or none."""
+    return os.environ.get("GENERATION_TRIGGER_MODE", "auto").strip().lower() or "auto"
+
+
+def _get_generation_job_name() -> str:
+    """Fully-qualified Cloud Run Job name used for background generation (empty = not configured)."""
+    explicit = os.environ.get("GENERATION_JOB_NAME", "").strip()
+    if explicit:
+        return explicit
+    short = os.environ.get("GENERATION_JOB_ID", "").strip()
+    if short:
+        return f"projects/{_get_project_id()}/locations/{_get_location()}/jobs/{short}"
+    return ""
+
+
+def _get_generation_stale_minutes() -> int:
+    try:
+        return max(5, int(os.environ.get("GENERATION_STALE_MINUTES", "13")))
+    except ValueError:
+        return 13
+
+
+def _run_cloud_run_generation_job(job_name: str, presentation_id: str) -> str:
+    """Triggers the generation Cloud Run Job (REST v2 `jobs.run` with env overrides). Returns the execution/operation name."""
+    import google.auth
+    from google.auth.transport.requests import AuthorizedSession
+
+    credentials, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    session = AuthorizedSession(credentials)
+    url = f"https://run.googleapis.com/v2/{job_name}:run"
+    body = {
+        "overrides": {
+            "containerOverrides": [
+                {"env": [{"name": "PRESENTATION_ID", "value": presentation_id}]}
+            ],
+            "taskCount": 1,
+        }
+    }
+    resp = session.post(url, json=body, timeout=30)
+    if resp.status_code >= 300:
+        raise RuntimeError(
+            f"jobs.run failed HTTP {resp.status_code}: {resp.text[:400]}"
+        )
+    payload = resp.json() if resp.content else {}
+    return str(
+        (payload.get("metadata") or {}).get("name") or payload.get("name") or ""
+    )
+
+
+def _run_generation_inline_thread(presentation_id: str) -> None:
+    from app.generation_worker import generate_presentation
+
+    try:
+        generate_presentation(presentation_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Inline background generation failed for %s: %s", presentation_id, exc)
+
+
+def _start_background_generation(presentation_id: str) -> dict[str, Any]:
+    """Kicks off asynchronous deck generation and returns how it was dispatched (never raises)."""
+    mode = _get_generation_trigger_mode()
+    job_name = _get_generation_job_name()
+    if mode == "none":
+        return {"mode": "none"}
+    if mode == "sync":
+        from app.generation_worker import generate_presentation
+
+        result = generate_presentation(presentation_id)
+        return {"mode": "sync", "worker_result": result}
+    if mode in ("auto", "cloud_run_job") and job_name:
+        try:
+            execution = _run_cloud_run_generation_job(job_name, presentation_id)
+            return {"mode": "cloud_run_job", "job_name": job_name, "execution": execution}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Cloud Run Job trigger failed (%s); falling back to inline thread: %s",
+                job_name,
+                exc,
+            )
+            if mode == "cloud_run_job":
+                return {"mode": "cloud_run_job_failed", "error": str(exc)[:300]}
+    worker = threading.Thread(
+        target=_run_generation_inline_thread,
+        args=(presentation_id,),
+        name=f"proposal-gen-{presentation_id}",
+        daemon=True,
+    )
+    worker.start()
+    return {"mode": "inline_thread"}
+
+
+def _tool_error(exc: Exception, action: str, **extra: Any) -> dict[str, Any]:
+    """Uniform non-raising error payload so a tool failure never aborts the agent turn."""
+    logger.exception("%s failed: %s", action, exc)
+    payload: dict[str, Any] = {
+        "status": "ERROR",
+        "action": action,
+        "error_type": type(exc).__name__,
+        "error": str(exc)[:600],
+        "user_message": (
+            "処理中にエラーが発生しました。内容を確認のうえ、必要に応じて条件を変えて再度お試しください。"
+        ),
+    }
+    if isinstance(exc, ValueError) and "not found" in str(exc).lower():
+        payload["status"] = "NOT_FOUND"
+        payload["user_message"] = (
+            "指定されたプレゼンテーションIDが見つかりませんでした。list_proposal_websites で一覧を確認してください。"
+        )
+    payload.update(extra)
+    return payload
 
 
 def create_proposal_website(
@@ -724,56 +1144,98 @@ def create_proposal_website(
     deck_spec_json: str = "",
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
-    """Generates a bespoke 6-slide HTML5 proposal website, uploads it to Private GCS, and issues credentials in Firestore."""
+    """Issues the share URL / viewer ID / password immediately and generates the 6-slide HTML5 proposal website in the background.
+
+    Call this tool ONLY when the user explicitly asks to generate/publish a proposal website or approves an outline.
+    Do NOT call this tool when the user only says a greeting like 'こんにちは'.
+    Pass the agreed outline as natural language inside `proposal_brief`; use `deck_spec_json` only for a complete
+    PresentationDeckSpec JSON (non-conforming JSON is accepted and treated as an outline hint, never an error).
+
+    Args:
+        client_name: Target client company name (e.g., '株式会社サンプル商事').
+        proposal_title: Main title of the proposal presentation.
+        proposal_brief: Summary of client challenges, proposed solution, architecture, target ROI, and the agreed slide outline.
+        theme_color: Visual accent theme ('sky', 'emerald', 'violet', 'amber', or 'rose').
+        expiration_days: Number of days until the shared URL expires (default 14).
+        deck_spec_json: Optional full JSON string matching PresentationDeckSpec.
+        tool_context: Optional ADK ToolContext.
+
+    Returns:
+        Dictionary with `status` ('GENERATING' while the background generation runs, 'PUBLISHED' when the deck is already
+        complete, or 'ERROR'), `presentation_id`, `share_url`, `viewer_id`, `viewer_password`, `expires_at`,
+        `generation_status`, and `next_action` guidance. The share URL shows a "生成中" page until the deck is ready and
+        then switches to the finished presentation automatically.
+    """
+    try:
+        return _create_proposal_website_impl(
+            client_name=client_name,
+            proposal_title=proposal_title,
+            proposal_brief=proposal_brief,
+            theme_color=theme_color,
+            expiration_days=expiration_days,
+            deck_spec_json=deck_spec_json,
+            tool_context=tool_context,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _tool_error(
+            exc,
+            "create_proposal_website",
+            next_action="クライアント名・提案タイトル・提案概要を確認し、再度 create_proposal_website を呼び出してください。",
+        )
+
+
+def _create_proposal_website_impl(
+    client_name: str,
+    proposal_title: str,
+    proposal_brief: str,
+    theme_color: str,
+    expiration_days: int,
+    deck_spec_json: str,
+    tool_context: ToolContext | None,
+) -> dict[str, Any]:
     raw_spec = tool_context.state.get("deck_spec") if tool_context else None
     if not raw_spec and deck_spec_json:
         raw_spec = deck_spec_json
 
-    generation_engine = "state_deck_spec"
-    if raw_spec:
-        deck_dict = _extract_deck_dict_from_state(raw_spec)
-        if theme_color and theme_color in SUPPORTED_THEME_COLORS:
-            deck_dict.setdefault("theme_color", theme_color)
-        deck_obj = PresentationDeckSpec.model_validate(deck_dict)
-    else:
-        if not client_name and not proposal_title and not proposal_brief:
-            raise ValueError(
-                "Either (client_name, proposal_title, proposal_brief) or deck_spec must be provided."
-            )
-        eff_client = client_name or "Sample Client Inc."
-        eff_title = (
-            proposal_title or f"{eff_client}様向け AI×UX変革ご提案プレゼンテーション"
-        )
-        eff_brief = proposal_brief or eff_title
-        knowledge_json = search_internal_knowledge(
-            f"{eff_client} {eff_title} {eff_brief}"
-        )
-        deck_obj, generation_engine = synthesize_deck_spec_with_skill(
-            client_name=eff_client,
-            proposal_title=eff_title,
-            proposal_brief=eff_brief,
-            theme_color=theme_color,
-            knowledge_context=knowledge_json,
-        )
+    theme = theme_color if theme_color in SUPPORTED_THEME_COLORS else "sky"
+    deck_obj, outline_hint = _coerce_deck_spec(raw_spec, theme)
+
+    eff_client = (client_name or "").strip()
+    eff_title = (proposal_title or "").strip()
+    eff_brief = (proposal_brief or "").strip()
+    if deck_obj is not None:
+        eff_client = eff_client or deck_obj.client_name
+        eff_title = eff_title or deck_obj.proposal_title
+        eff_brief = eff_brief or deck_obj.subtitle
+    if not eff_client and not eff_title and not eff_brief and not outline_hint:
+        return {
+            "status": "ERROR",
+            "action": "create_proposal_website",
+            "error_type": "MissingInput",
+            "error": "Either (client_name, proposal_title, proposal_brief) or deck_spec must be provided.",
+            "user_message": "クライアント名・提案タイトル・提案概要のいずれかをご指定ください。",
+            "next_action": "ユーザーにクライアント企業名と提案テーマをヒアリングしてから再度呼び出してください。",
+        }
+    eff_client = eff_client or "クライアント企業"
+    eff_title = eff_title or f"{eff_client}様向け AI×UX変革ご提案プレゼンテーション"
+    eff_brief = eff_brief or eff_title
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     now_jst = now_utc.astimezone(datetime.timezone(datetime.timedelta(hours=9)))
-    exp_days = max(1, min(expiration_days, 365))
+    exp_days = max(1, min(int(expiration_days or 14), 365))
     expires_utc = now_utc + datetime.timedelta(days=exp_days)
-
-    html_content = render_deck_html(
-        deck_obj,
-        generated_date=now_jst.strftime("%Y-%m-%d %H:%M JST"),
-    )
 
     short_id = uuid.uuid4().hex[:8]
     date_prefix = now_jst.strftime("%Y%m%d")
     presentation_id = f"prop-{date_prefix}-{short_id}"
 
-    safe_slug = re.sub(r"[^a-z0-9-]+", "-", deck_obj.client_slug.lower()).strip("-")
-    if not safe_slug:
-        safe_slug = "client"
-    viewer_id = f"client-{safe_slug[:16]}-{secrets.token_hex(2)}"
+    slug_source = deck_obj.client_slug if deck_obj is not None else eff_client
+    safe_slug = re.sub(r"[^a-z0-9-]+", "-", slug_source.lower()).strip("-")
+    if safe_slug:
+        viewer_id = f"client-{safe_slug[:16]}-{secrets.token_hex(2)}"
+    else:
+        # Non-ASCII client names (e.g. Japanese) produce no slug -> use the presentation short id.
+        viewer_id = f"client-{short_id}-{secrets.token_hex(2)}"
     viewer_password = secrets.token_urlsafe(12)
     password_hash, password_salt = hash_password(viewer_password)
 
@@ -783,61 +1245,153 @@ def create_proposal_website(
     hosting_base_url = _get_hosting_base_url()
     blob_path = f"presentations/{presentation_id}/index.html"
     gcs_uri = f"gs://{bucket_name}/{blob_path}"
+    share_url = f"{hosting_base_url}/p/{presentation_id}"
+    expires_label = expires_utc.strftime(f"%Y-%m-%d %H:%M UTC ({exp_days}日間有効)")
 
-    from google.cloud import firestore, storage
-
-    storage_client = storage.Client(project=project_id)
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(blob_path)
-    blob.cache_control = "no-store, private"
-    blob.upload_from_string(
-        html_content.encode("utf-8"),
-        content_type="text/html; charset=utf-8",
-    )
+    base_doc: dict[str, Any] = {
+        "presentation_id": presentation_id,
+        "viewer_id": viewer_id,
+        "password_hash": password_hash,
+        "password_salt": password_salt,
+        "gcs_bucket": bucket_name,
+        "gcs_blob_path": blob_path,
+        "gcs_uri": gcs_uri,
+        "client_name": eff_client,
+        "proposal_title": eff_title,
+        "subtitle": eff_brief[:160],
+        "theme_color": theme,
+        "skill_applied": "interactive-slide-designer",
+        "created_at": now_utc.isoformat(),
+        "updated_at": now_utc.isoformat(),
+        "expires_at": expires_utc.isoformat(),
+        "status": "active",
+        "is_active": True,
+    }
 
     fs_client = _get_firestore_client(project_id)
     doc_ref = fs_client.collection(collection_name).document(presentation_id)
-    doc_ref.set(
-        {
+
+    # --- Fast path: a complete, schema-valid deck was supplied -> render & publish synchronously (no LLM work)
+    if deck_obj is not None:
+        deck_obj.theme_color = theme
+        html_content = render_deck_html(
+            deck_obj, generated_date=now_jst.strftime("%Y-%m-%d %H:%M JST")
+        )
+        from google.cloud import storage
+
+        storage_client = storage.Client(project=project_id)
+        blob = storage_client.bucket(bucket_name).blob(blob_path)
+        blob.cache_control = "no-store, private"
+        blob.upload_from_string(
+            html_content.encode("utf-8"), content_type="text/html; charset=utf-8"
+        )
+        doc_ref.set(
+            {
+                **base_doc,
+                "client_name": deck_obj.client_name,
+                "proposal_title": deck_obj.proposal_title,
+                "subtitle": deck_obj.subtitle,
+                "deck_spec": deck_obj.model_dump(),
+                "generation_status": "ready",
+                "generation_phase": "ready",
+                "generation_engine": "state_deck_spec",
+                "generation_requested_at": now_utc.isoformat(),
+                "ready_at": now_utc.isoformat(),
+            }
+        )
+        result = {
+            "status": "PUBLISHED",
+            "generation_status": "ready",
             "presentation_id": presentation_id,
-            "viewer_id": viewer_id,
-            "password_hash": password_hash,
-            "password_salt": password_salt,
-            "gcs_bucket": bucket_name,
-            "gcs_blob_path": blob_path,
-            "gcs_uri": gcs_uri,
             "client_name": deck_obj.client_name,
             "proposal_title": deck_obj.proposal_title,
-            "subtitle": deck_obj.subtitle,
             "theme_color": deck_obj.theme_color,
-            "deck_spec": deck_obj.model_dump(),
-            "generation_engine": generation_engine,
+            "generation_engine": "state_deck_spec",
+            "generation_engine_label": describe_generation_engine("state_deck_spec"),
             "skill_applied": "interactive-slide-designer",
-            "created_at": now_utc.isoformat(),
-            "updated_at": now_utc.isoformat(),
-            "expires_at": expires_utc.isoformat(),
-            "status": "active",
-            "is_active": True,
+            "share_url": share_url,
+            "viewer_id": viewer_id,
+            "viewer_password": viewer_password,
+            "expires_at": expires_label,
+            "gcs_uri": gcs_uri,
+            "slide_outline": _build_slide_outline(deck_obj),
+            "next_action": "URL・閲覧用ID・パスワード・有効期限をユーザーに提示してください。",
+        }
+        if tool_context is not None:
+            tool_context.state["published_result"] = result
+            tool_context.state["published_presentation"] = result
+        return result
+
+    # --- Async path: issue credentials now, generate the deck in the background
+    doc_ref.set(
+        {
+            **base_doc,
+            "generation_status": "generating",
+            "generation_phase": "queued",
+            "generation_engine": "",
+            "generation_requested_at": now_utc.isoformat(),
+            "generation_inputs": {
+                "client_name": eff_client,
+                "proposal_title": eff_title,
+                "proposal_brief": eff_brief,
+                "theme_color": theme,
+                "outline_hint": outline_hint,
+                "expiration_days": exp_days,
+            },
         }
     )
 
-    share_url = f"{hosting_base_url}/p/{presentation_id}"
-    slide_outline = _build_slide_outline(deck_obj)
+    dispatch = _start_background_generation(presentation_id)
+    dispatch_mode = str(dispatch.get("mode", "unknown"))
+    try:
+        doc_ref.update(
+            {
+                "generation_dispatch": dispatch_mode,
+                "generation_execution": str(dispatch.get("execution", ""))[:300],
+                "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.info("dispatch bookkeeping skipped: %s", exc)
+
+    status_value = "GENERATING"
+    generation_status = "generating"
+    generation_engine = ""
+    if dispatch_mode == "sync":
+        worker_result = dispatch.get("worker_result") or {}
+        generation_status = str(worker_result.get("generation_status", "ready"))
+        generation_engine = str(worker_result.get("generation_engine", ""))
+        status_value = "PUBLISHED" if generation_status == "ready" else "GENERATING"
 
     result = {
-        "status": "PUBLISHED",
+        "status": status_value,
+        "generation_status": generation_status,
+        "generation_dispatch": dispatch_mode,
         "presentation_id": presentation_id,
-        "client_name": deck_obj.client_name,
-        "proposal_title": deck_obj.proposal_title,
-        "theme_color": deck_obj.theme_color,
+        "client_name": eff_client,
+        "proposal_title": eff_title,
+        "theme_color": theme,
         "generation_engine": generation_engine,
+        "generation_engine_label": describe_generation_engine(generation_engine)
+        if generation_engine
+        else "生成中（Managed Agents API → 時間予算超過時は gemini-3.8-flash へ自動切替）",
+        "generation_plan": (
+            f"1) Managed Agents API ({MANAGED_AGENT_MODEL}) 最大約{_get_managed_agent_deadline_seconds() // 60}分 → "
+            f"2) {_get_model_name()} 高速生成 → 3) テンプレート即時生成（必ず完成させます）"
+        ),
+        "estimated_completion": "通常1〜5分（最長でも約10分で自動完成）",
         "skill_applied": "interactive-slide-designer",
         "share_url": share_url,
         "viewer_id": viewer_id,
         "viewer_password": viewer_password,
-        "expires_at": expires_utc.strftime(f"%Y-%m-%d %H:%M UTC ({exp_days}日間有効)"),
+        "expires_at": expires_label,
         "gcs_uri": gcs_uri,
-        "slide_outline": slide_outline,
+        "outline_hint_applied": bool(outline_hint),
+        "next_action": (
+            "URL・閲覧用ID・パスワード・有効期限を今すぐユーザーに提示し、"
+            "『現在AIが生成中で、同じURLを開くと生成中画面が表示され、完成すると自動的に提案ページへ切り替わります』と案内してください。"
+            "進捗を聞かれたら get_proposal_status を呼び出してください。"
+        ),
     }
     if tool_context is not None:
         tool_context.state["published_result"] = result
@@ -856,6 +1410,111 @@ def publish_presentation(
 
 
 # ---------------------------------------------------------------------------
+# Tool 2b: Generation Status (with stale-generation self-repair)
+# ---------------------------------------------------------------------------
+
+
+def get_proposal_status(
+    presentation_id: str,
+    tool_context: ToolContext | None = None,
+) -> dict[str, Any]:
+    """Reports the generation status / engine of a proposal website (and self-heals stale generations).
+
+    Use when the user asks '生成状況を教えて', 'まだ完成しない？', or 'どのエンジンで生成された？'.
+    If a background generation has been running longer than the time budget, this tool completes it
+    immediately with the skill template so the share URL always ends up with a finished deck.
+
+    Args:
+        presentation_id: Target presentation ID (e.g., 'prop-20261003-xxxxxxxx').
+        tool_context: Optional ADK ToolContext.
+
+    Returns:
+        Dictionary with `generation_status` ('generating' | 'ready' | 'failed'), `generation_phase`,
+        `generation_engine`, `generation_engine_label`, `elapsed_seconds`, `share_url`, and `viewer_id`.
+    """
+    try:
+        project_id = _get_project_id()
+        collection_name = _get_firestore_collection()
+        hosting_base_url = _get_hosting_base_url()
+        fs_client = _get_firestore_client(project_id)
+        doc_ref = fs_client.collection(collection_name).document(presentation_id)
+        doc_snap = doc_ref.get()
+        if not doc_snap.exists:
+            return {
+                "status": "NOT_FOUND",
+                "presentation_id": presentation_id,
+                "user_message": f"プレゼンテーション '{presentation_id}' は見つかりませんでした。",
+            }
+        data = doc_snap.to_dict() or {}
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        gen_status = str(data.get("generation_status") or "").lower()
+        if not gen_status:
+            gen_status = "ready" if data.get("deck_spec") else "unknown"
+        requested_raw = str(
+            data.get("generation_requested_at") or data.get("created_at") or ""
+        )
+        elapsed_seconds: float | None = None
+        try:
+            requested_dt = datetime.datetime.fromisoformat(requested_raw)
+            if requested_dt.tzinfo is None:
+                requested_dt = requested_dt.replace(tzinfo=datetime.timezone.utc)
+            elapsed_seconds = round((now_utc - requested_dt).total_seconds(), 1)
+        except Exception:  # noqa: BLE001
+            elapsed_seconds = None
+
+        repaired = False
+        stale_after = _get_generation_stale_minutes() * 60
+        if gen_status == "generating" and elapsed_seconds is not None and elapsed_seconds > stale_after:
+            from app.generation_worker import finalize_with_fallback
+
+            repair = finalize_with_fallback(
+                presentation_id, reason=f"stale_after_{int(elapsed_seconds)}s"
+            )
+            data.update(repair.get("doc_updates", {}))
+            gen_status = str(data.get("generation_status") or "ready")
+            repaired = True
+
+        engine = str(data.get("generation_engine") or "")
+        phase = str(data.get("generation_phase") or gen_status)
+        if gen_status == "ready":
+            message = f"生成は完了しています（{describe_generation_engine(engine)}）。共有URLを開くと提案ページが表示されます。"
+        elif gen_status == "generating":
+            message = (
+                f"現在生成中です（フェーズ: {phase}、経過 {int(elapsed_seconds or 0)} 秒）。"
+                "共有URLでは生成中画面が表示され、完成すると自動的に提案ページへ切り替わります。"
+            )
+        elif gen_status == "failed":
+            message = f"生成に失敗しました: {str(data.get('generation_error') or '')[:200]}"
+        else:
+            message = "生成状況を判定できませんでした。"
+        result = {
+            "status": "STATUS",
+            "presentation_id": presentation_id,
+            "client_name": data.get("client_name", ""),
+            "proposal_title": data.get("proposal_title", ""),
+            "generation_status": gen_status,
+            "generation_phase": phase,
+            "generation_detail": data.get("generation_detail", ""),
+            "generation_engine": engine,
+            "generation_engine_label": describe_generation_engine(engine) if engine else "",
+            "generation_dispatch": data.get("generation_dispatch", ""),
+            "elapsed_seconds": elapsed_seconds,
+            "stale_repair_applied": repaired,
+            "ready_at": data.get("ready_at", ""),
+            "share_url": f"{hosting_base_url}/p/{presentation_id}",
+            "viewer_id": data.get("viewer_id", ""),
+            "expires_at": data.get("expires_at", ""),
+            "is_active": bool(data.get("is_active", True)),
+            "user_message": message,
+        }
+        if tool_context is not None:
+            tool_context.state["last_status_result"] = result
+        return result
+    except Exception as exc:  # noqa: BLE001
+        return _tool_error(exc, "get_proposal_status", presentation_id=presentation_id)
+
+
+# ---------------------------------------------------------------------------
 # Tool 3: Edit an Existing Proposal Website in Place
 # ---------------------------------------------------------------------------
 
@@ -869,7 +1528,60 @@ def edit_proposal_website(
     new_custom_callout: str = "",
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
-    """Edits an existing published proposal website and updates the live HTML in Private Cloud Storage."""
+    """Edits an existing published proposal website and updates the live HTML in Private Cloud Storage.
+
+    If the deck is still being generated in the background, returns `status='GENERATING'` instead of editing.
+
+    Args:
+        presentation_id: ID of the existing presentation (e.g., 'prop-20261003-xxxxxxxx').
+        edit_instructions: Natural-language description of changes to apply to the slides.
+        new_title: Optional explicit replacement for the proposal title.
+        new_subtitle: Optional explicit replacement for the proposal subtitle.
+        new_theme_color: Optional new accent color ('sky', 'emerald', 'violet', 'amber', 'rose').
+        new_custom_callout: Optional callout badge text to display on the cover slide.
+        tool_context: Optional ADK ToolContext.
+
+    Returns:
+        Dictionary containing `status` ('UPDATED', 'GENERATING', 'NOT_FOUND' or 'ERROR'), `presentation_id`,
+        `share_url`, `updated_fields`, and `slide_outline`.
+    """
+    try:
+        return _edit_proposal_website_impl(
+            presentation_id=presentation_id,
+            edit_instructions=edit_instructions,
+            new_title=new_title,
+            new_subtitle=new_subtitle,
+            new_theme_color=new_theme_color,
+            new_custom_callout=new_custom_callout,
+            tool_context=tool_context,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _tool_error(exc, "edit_proposal_website", presentation_id=presentation_id)
+
+
+def _edit_proposal_website_impl(
+    presentation_id: str,
+    edit_instructions: str,
+    new_title: str = "",
+    new_subtitle: str = "",
+    new_theme_color: str = "",
+    new_custom_callout: str = "",
+    tool_context: ToolContext | None = None,
+) -> dict[str, Any]:
+    """Edits an existing published proposal website and updates the live HTML in Private Cloud Storage.
+
+    Args:
+        presentation_id: ID of the existing presentation (e.g., 'prop-20261003-xxxxxxxx').
+        edit_instructions: Natural-language description of changes to apply to the slides.
+        new_title: Optional explicit replacement for the proposal title.
+        new_subtitle: Optional explicit replacement for the proposal subtitle.
+        new_theme_color: Optional new accent color ('sky', 'emerald', 'violet', 'amber', 'rose').
+        new_custom_callout: Optional callout badge text to display on the cover slide.
+        tool_context: Optional ADK ToolContext.
+
+    Returns:
+        Dictionary containing `status='UPDATED'`, `presentation_id`, `share_url`, `updated_fields`, and `slide_outline`.
+    """
     project_id = _get_project_id()
     location = _get_location()
     collection_name = _get_firestore_collection()
@@ -884,6 +1596,17 @@ def edit_proposal_website(
         raise ValueError(f"Presentation '{presentation_id}' not found in Firestore.")
 
     doc_data = doc_snap.to_dict() or {}
+    if str(doc_data.get("generation_status") or "").lower() == "generating":
+        return {
+            "status": "GENERATING",
+            "presentation_id": presentation_id,
+            "generation_phase": doc_data.get("generation_phase", ""),
+            "share_url": f"{hosting_base_url}/p/{presentation_id}",
+            "user_message": (
+                "このプレゼンテーションはまだ生成中のため、まだ修正できません。"
+                "完成後（共有URLが提案ページに切り替わった後）に再度ご指示ください。"
+            ),
+        }
     bucket_name = doc_data.get("gcs_bucket") or _get_bucket_name()
     blob_path = (
         doc_data.get("gcs_blob_path") or f"presentations/{presentation_id}/index.html"
@@ -1042,7 +1765,39 @@ def list_proposal_websites(
     include_revoked: bool = True,
     limit: int = 20,
 ) -> dict[str, Any]:
-    """Lists existing proposal websites registered in Firestore with status, URLs, and access counts."""
+    """Lists existing proposal websites registered in Firestore with status, generation state, URLs, and access counts.
+
+    Args:
+        client_filter: Optional substring to filter by client_name or proposal_title.
+        include_revoked: Whether to include revoked/inactive presentations (default True).
+        limit: Maximum number of presentations to return (default 20).
+
+    Returns:
+        Dictionary with `count` and `presentations` list (each with `generation_status` / `generation_engine`).
+    """
+    try:
+        return _list_proposal_websites_impl(
+            client_filter=client_filter, include_revoked=include_revoked, limit=limit
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _tool_error(exc, "list_proposal_websites")
+
+
+def _list_proposal_websites_impl(
+    client_filter: str = "",
+    include_revoked: bool = True,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Lists existing proposal websites registered in Firestore with status, URLs, and access counts.
+
+    Args:
+        client_filter: Optional substring to filter by client_name or proposal_title.
+        include_revoked: Whether to include revoked/inactive presentations (default True).
+        limit: Maximum number of presentations to return (default 20).
+
+    Returns:
+        Dictionary with `count` and `presentations` list.
+    """
     project_id = _get_project_id()
     collection_name = _get_firestore_collection()
     hosting_base_url = _get_hosting_base_url()
@@ -1095,6 +1850,8 @@ def list_proposal_websites(
                 "updated_at": data.get("updated_at", data.get("created_at", "")),
                 "expires_at": data.get("expires_at", ""),
                 "access_log_count": access_count,
+                "generation_status": data.get("generation_status", "ready" if data.get("deck_spec") else ""),
+                "generation_engine": data.get("generation_engine", ""),
             }
         )
 
@@ -1118,7 +1875,34 @@ def get_proposal_access_logs(
     presentation_id: str,
     limit: int = 20,
 ) -> dict[str, Any]:
-    """Retrieves viewer authentication and access audit logs for a specific presentation."""
+    """Retrieves viewer authentication and access audit logs for a specific presentation.
+
+    Args:
+        presentation_id: Target presentation ID (e.g., 'prop-20261003-xxxxxxxx').
+        limit: Maximum number of recent log entries to return (default 20).
+
+    Returns:
+        Dictionary with presentation summary and `access_logs` list (or `status='NOT_FOUND'`/`'ERROR'`).
+    """
+    try:
+        return _get_proposal_access_logs_impl(presentation_id=presentation_id, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        return _tool_error(exc, "get_proposal_access_logs", presentation_id=presentation_id)
+
+
+def _get_proposal_access_logs_impl(
+    presentation_id: str,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Retrieves viewer authentication and access audit logs for a specific presentation.
+
+    Args:
+        presentation_id: Target presentation ID (e.g., 'prop-20261003-xxxxxxxx').
+        limit: Maximum number of recent log entries to return (default 20).
+
+    Returns:
+        Dictionary with presentation summary and `access_logs` list.
+    """
     project_id = _get_project_id()
     collection_name = _get_firestore_collection()
 
@@ -1163,7 +1947,50 @@ def manage_proposal_credentials(
     extend_days: int = 0,
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
-    """Rotates the viewer password, updates viewer_id, or extends the expiration date for a presentation."""
+    """Rotates the viewer password, updates viewer_id, or extends the expiration date for a presentation.
+
+    Args:
+        presentation_id: Target presentation ID.
+        rotate_password: If True, generates a new random password and updates its PBKDF2 hash in Firestore.
+        new_viewer_id: Optional custom viewer_id to set.
+        extend_days: If > 0, extends `expires_at` by this many days from now and ensures the presentation is active.
+        tool_context: Optional ADK ToolContext.
+
+    Returns:
+        Dictionary with updated `viewer_id`, `new_viewer_password` (if rotated), `expires_at`, and `share_url`
+        (or `status='NOT_FOUND'`/`'ERROR'`).
+    """
+    try:
+        return _manage_proposal_credentials_impl(
+            presentation_id=presentation_id,
+            rotate_password=rotate_password,
+            new_viewer_id=new_viewer_id,
+            extend_days=extend_days,
+            tool_context=tool_context,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _tool_error(exc, "manage_proposal_credentials", presentation_id=presentation_id)
+
+
+def _manage_proposal_credentials_impl(
+    presentation_id: str,
+    rotate_password: bool = True,
+    new_viewer_id: str = "",
+    extend_days: int = 0,
+    tool_context: ToolContext | None = None,
+) -> dict[str, Any]:
+    """Rotates the viewer password, updates viewer_id, or extends the expiration date for a presentation.
+
+    Args:
+        presentation_id: Target presentation ID.
+        rotate_password: If True, generates a new random password and updates its PBKDF2 hash in Firestore.
+        new_viewer_id: Optional custom viewer_id to set.
+        extend_days: If > 0, extends `expires_at` by this many days from now and ensures the presentation is active.
+        tool_context: Optional ADK ToolContext.
+
+    Returns:
+        Dictionary with updated `viewer_id`, `new_viewer_password` (if rotated), `expires_at`, and `share_url`.
+    """
     project_id = _get_project_id()
     collection_name = _get_firestore_collection()
     hosting_base_url = _get_hosting_base_url()
@@ -1231,7 +2058,45 @@ def delete_proposal_website(
     hard_delete_gcs: bool = False,
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
-    """Revokes external access to a proposal website (and optionally deletes the HTML blob from GCS)."""
+    """Revokes external access to a proposal website (and optionally deletes the HTML blob from GCS).
+
+    Once called, the Cloud Run Hosting Gateway immediately returns HTTP 403 Forbidden for `/p/<presentation_id>`.
+
+    Args:
+        presentation_id: Target presentation ID to revoke/delete.
+        hard_delete_gcs: If True, also deletes `presentations/<presentation_id>/index.html` from Private GCS.
+        tool_context: Optional ADK ToolContext.
+
+    Returns:
+        Dictionary confirming `status='REVOKED'` and whether the GCS blob was deleted (or `status='NOT_FOUND'`/`'ERROR'`).
+    """
+    try:
+        return _delete_proposal_website_impl(
+            presentation_id=presentation_id,
+            hard_delete_gcs=hard_delete_gcs,
+            tool_context=tool_context,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _tool_error(exc, "delete_proposal_website", presentation_id=presentation_id)
+
+
+def _delete_proposal_website_impl(
+    presentation_id: str,
+    hard_delete_gcs: bool = False,
+    tool_context: ToolContext | None = None,
+) -> dict[str, Any]:
+    """Revokes external access to a proposal website (and optionally deletes the HTML blob from GCS).
+
+    Once called, the Cloud Run Hosting Gateway immediately returns HTTP 403 Forbidden for `/p/<presentation_id>`.
+
+    Args:
+        presentation_id: Target presentation ID to revoke/delete.
+        hard_delete_gcs: If True, also deletes `presentations/<presentation_id>/index.html` from Private GCS.
+        tool_context: Optional ADK ToolContext.
+
+    Returns:
+        Dictionary confirming `status='REVOKED'` and whether the GCS blob was deleted.
+    """
     project_id = _get_project_id()
     collection_name = _get_firestore_collection()
 
@@ -1307,21 +2172,29 @@ CONCIERGE_INSTRUCTION = """あなたは提案書Webサイト制作・配信・�
    - ユーザーが「まずは構成案を相談したい」「過去の類似事例を調べて」と依頼した場合は、`search_internal_knowledge` を呼び出して社内データストアの過去RFP・導入事例・標準メソドロジーを検索し、全6スライドの構成案をチャット上で提示して「この内容でWebサイトを発行してよろしいでしょうか？」と確認してください。
 
 3. **提案Webサイトの新規生成・限定公開 (`create_proposal_website`)**:
-   - ユーザーがクライアント名と提案テーマを指定して「提案プレゼンテーションHTMLを作成・公開してください」「この内容でWebサイトを発行して」と明示的に依頼した場合は、`create_proposal_website` を呼び出してHTML5サイトを生成・非公開Cloud Storageへ保存し、Firestoreに認証情報を登録してください。
-   - 発行完了後は、以下の項目をわかりやすく日本語で提示してください：
+   - ユーザーがクライアント名と提案テーマを指定して「提案プレゼンテーションHTMLを作成・公開してください」「この内容でWebサイトを発行して」「はい、お願いします」と明示的に依頼・承認した場合にのみ、`create_proposal_website` を呼び出してください。
+   - 呼び出し時は `client_name` / `proposal_title` / `proposal_brief` / `theme_color` を自然言語で渡してください。チャットで合意した構成案やスライドごとの要点は **`proposal_brief` の中に文章として含めてください**。`deck_spec_json` には完全な `PresentationDeckSpec` JSON が手元にある場合以外は何も渡さないでください（独自形式の構成JSONを渡す必要はありません）。
+   - このツールは **即座に** 共有URL・閲覧用ID・パスワードを発行して返します（`status` が `GENERATING`）。スライド本体は裏側で Managed Agents API（Antigravity ハーネス）が生成し、最大約10分の時間予算を超えた場合は自動的に gemini-3.8-flash の高速生成へ切り替わるため、必ず完成します。
+   - ツール応答を受け取ったら、**その同じターン内で必ず** 以下を日本語でわかりやすく提示してください（決して無言で終わらないこと）：
      1. **プレゼンテーションID** (`presentation_id`)
      2. **顧客共有用プレゼンテーションURL** (`share_url`)
      3. **閲覧用ID** (`viewer_id`)
      4. **初期パスワード** (`viewer_password`)
      5. **有効期限** (`expires_at`) と **デザインテーマ** (`theme_color`)
-     6. **全6スライドの構成サマリー** (`slide_outline`)
+     6. 生成状況の案内：「現在AIがスライドを生成中です。URLを開くと生成中画面が表示され、完成すると自動的に提案ページへ切り替わります（通常1〜5分、最長でも約10分）。」
+   - `status` が `PUBLISHED` の場合は、既に完成済みであることと `slide_outline` の構成サマリーを提示してください。
+   - `status` が `ERROR` の場合は、`user_message` と `next_action` に従ってユーザーに状況を説明し、必要な情報を確認してください。
 
-4. **発行済みWebサイトの管理・修正・削除（ライフサイクル管理ツール）**:
+4. **生成状況の確認 (`get_proposal_status`)**:
+   - 「生成状況を教えて」「まだ完成しない？」「どのエンジンで作られた？」と聞かれたら `get_proposal_status` を呼び出し、`generation_status`（generating / ready / failed）、`generation_phase`、経過時間、完成時は `generation_engine_label`（Managed Agents API で完成したのか、gemini-3.8-flash 高速生成に自動切替されたのか）を報告してください。
+
+5. **発行済みWebサイトの管理・修正・削除（ライフサイクル管理ツール）**:
    - **一覧確認**: 「発行済みのサイト一覧を見せて」と言われたら `list_proposal_websites` を呼び出してください。
    - **閲覧監査ログ確認**: 「誰がいつアクセスしたかログを見せて」と言われたら `get_proposal_access_logs` を呼び出してください。
-   - **内容・デザインの修正**: 「発行済みの `<presentation_id>` のタイトルやテーマカラー、内容を修正して」と言われたら `edit_proposal_website` を呼び出し、同じURLのまま最新HTMLへ更新したことを伝えてください。
+   - **内容・デザインの修正**: 「発行済みの `<presentation_id>` のタイトルやテーマカラー、内容を修正して」と言われたら `edit_proposal_website` を呼び出し、同じURLのまま最新HTMLへ更新したことを伝えてください。`status` が `GENERATING` なら、まだ生成中のため完成後に再度依頼いただくよう案内してください。
    - **パスワード再発行・期限延長**: 「パスワードを再発行して」「有効期限を延長して」と言われたら `manage_proposal_credentials` を呼び出し、新しい認証情報を提示してください。
    - **公開停止・削除**: 「`<presentation_id>` の公開を停止（削除）して」と言われたら `delete_proposal_website` を呼び出し、外部からのアクセスが即座に遮断（HTTP 403）されたことを報告してください。
+   - いずれのツールも `status` が `NOT_FOUND` / `ERROR` の場合は、その旨と `user_message` をユーザーに伝えてください。
 """
 
 root_agent = LlmAgent(
@@ -1333,13 +2206,14 @@ root_agent = LlmAgent(
     ),
     description=(
         "対話型コンシェルジュによるクライアント提案用HTML5スライドWebサイト生成・限定公開・ライフサイクル管理エージェント。"
-        "ヒアリングと社内ナレッジ検索、6枚構成インタラクティブHTMLサイトの生成、発行後の修正・閲覧ログ確認・"
-        "パスワード再発行・公開停止（削除）を一気通貫で実行します。"
+        "ヒアリングと社内ナレッジ検索、6枚構成インタラクティブHTMLサイトの非同期生成（Managed Agents API → gemini-3.8-flash 自動フォールバック）、"
+        "発行後の修正・閲覧ログ確認・パスワード再発行・公開停止（削除）を一気通貫で実行します。"
     ),
     instruction=CONCIERGE_INSTRUCTION,
     tools=[
         search_internal_knowledge,
         create_proposal_website,
+        get_proposal_status,
         edit_proposal_website,
         list_proposal_websites,
         get_proposal_access_logs,

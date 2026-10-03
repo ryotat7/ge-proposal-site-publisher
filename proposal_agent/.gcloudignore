@@ -1,0 +1,15 @@
+# Build context for `gcloud run jobs deploy --source` (generation worker) – keep it minimal.
+.gcloudignore
+.git
+.gitignore
+.venv/
+**/__pycache__/
+*.pyc
+.env
+.env.*
+tests/
+deployment/
+deployment_metadata.json
+agents-cli-manifest.yaml
+uv.lock
+GEMINI.md
