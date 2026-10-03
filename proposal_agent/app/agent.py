@@ -61,8 +61,15 @@ def _get_location() -> str:
     return os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
 
 
+def _get_model_name() -> str:
+    return os.environ.get("GEMINI_MODEL", MODEL)
+
+
 def _get_genai_location(model_name: str | None = None) -> str:
-    target = (model_name or MODEL).lower()
+    explicit = os.environ.get("GENAI_LOCATION", "").strip()
+    if explicit:
+        return explicit
+    target = (model_name or _get_model_name()).lower()
     if target.startswith("gemini-3") or target.startswith("antigravity"):
         return "global"
     return _get_location()
@@ -103,12 +110,12 @@ def _get_hosting_base_url() -> str:
 
 def _get_datastore_id() -> str:
     return os.environ.get(
-        "VERTEX_SEARCH_DATASTORE_ID", "proposal-knowledge-datastore"
+        "AGENT_SEARCH_DATASTORE_ID", "proposal-knowledge-datastore"
     )
 
 
 def _get_datastore_location() -> str:
-    return os.environ.get("VERTEX_SEARCH_LOCATION", "global")
+    return os.environ.get("AGENT_SEARCH_LOCATION", "global")
 
 
 def _get_brand_name() -> str:
@@ -510,7 +517,8 @@ def synthesize_deck_spec_with_skill(
 {skill_text}
 """
     project_id = _get_project_id()
-    genai_location = _get_genai_location(MODEL)
+    active_model = _get_model_name()
+    genai_location = _get_genai_location(active_model)
 
     if os.environ.get("ENABLE_MANAGED_AGENTS_API", "true").lower() in ("true", "1"):
         try:
@@ -537,29 +545,36 @@ def synthesize_deck_spec_with_skill(
             logger.info(
                 "Managed Agents API (%s) fallback to Agent Platform Gemini (%s): %s",
                 MANAGED_AGENT_MODEL,
-                MODEL,
+                active_model,
                 exc,
             )
 
-    try:
-        client = genai.Client(
-            vertexai=True, project=project_id, location=genai_location
-        )
-        resp = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=PresentationDeckSpec,
-                temperature=0.25,
-            ),
-        )
-        if resp.text:
-            deck_obj = PresentationDeckSpec.model_validate_json(resp.text)
-            deck_obj.theme_color = theme
-            return deck_obj, f"agent_platform_gemini_with_skill:{MODEL}"
-    except Exception as exc:
-        logger.warning("Gemini structured synthesis fallback triggered: %s", exc)
+    candidate_locations = [genai_location]
+    if "global" not in candidate_locations:
+        candidate_locations.append("global")
+
+    for loc in candidate_locations:
+        try:
+            client = genai.Client(
+                vertexai=True, project=project_id, location=loc
+            )
+            resp = client.models.generate_content(
+                model=active_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=PresentationDeckSpec,
+                    temperature=0.25,
+                ),
+            )
+            if resp.text:
+                deck_obj = PresentationDeckSpec.model_validate_json(resp.text)
+                deck_obj.theme_color = theme
+                return deck_obj, f"agent_platform_gemini_with_skill:{active_model}"
+        except Exception as exc:
+            logger.warning(
+                "Gemini structured synthesis failed on location=%s: %s", loc, exc
+            )
 
     return (
         _default_deck_spec_from_brief(
@@ -902,14 +917,13 @@ def edit_proposal_website(
     if edit_instructions and os.environ.get(
         "ENABLE_LLM_DECK_EDIT", "true"
     ).lower() in ("true", "1"):
-        try:
-            client = genai.Client(
-                vertexai=True,
-                project=project_id,
-                location=_get_genai_location(MODEL),
-            )
-            html_excerpt = existing_html[:1500] if existing_html else "(Not cached)"
-            edit_prompt = f"""既存の6枚構成プレゼンテーションデータ（JSON）およびCloud Storage上の現行HTMLに対して、ユーザーの修正指示を反映した新しい `PresentationDeckSpec` JSONを出力してください。
+        active_model = _get_model_name()
+        genai_location = _get_genai_location(active_model)
+        candidate_locations = [genai_location]
+        if genai_location != "global":
+            candidate_locations.append("global")
+        html_excerpt = existing_html[:1500] if existing_html else "(Not cached)"
+        edit_prompt = f"""既存の6枚構成プレゼンテーションデータ（JSON）およびCloud Storage上の現行HTMLに対して、ユーザーの修正指示を反映した新しい `PresentationDeckSpec` JSONを出力してください。
 変更指示がないフィールドは既存の値を維持してください。
 
 【Cloud Storage上の現行HTML抜粋 ({blob_path})】:
@@ -921,20 +935,33 @@ def edit_proposal_website(
 【ユーザーの修正指示】:
 {edit_instructions}
 """
-            resp = client.models.generate_content(
-                model=MODEL,
-                contents=edit_prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=PresentationDeckSpec,
-                    temperature=0.2,
-                ),
-            )
-            if resp.text:
-                deck_obj = PresentationDeckSpec.model_validate_json(resp.text)
-                updated_fields.append("llm_deck_refinement")
-        except Exception as exc:
-            logger.info("LLM edit fallback to deterministic field updates: %s", exc)
+        for loc in candidate_locations:
+            try:
+                client = genai.Client(
+                    vertexai=True,
+                    project=project_id,
+                    location=loc,
+                )
+                resp = client.models.generate_content(
+                    model=active_model,
+                    contents=edit_prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=PresentationDeckSpec,
+                        temperature=0.2,
+                    ),
+                )
+                if resp.text:
+                    deck_obj = PresentationDeckSpec.model_validate_json(resp.text)
+                    updated_fields.append("llm_deck_refinement")
+                    break
+            except Exception as exc:
+                logger.info(
+                    "LLM edit (%s at %s) fallback to deterministic field updates: %s",
+                    active_model,
+                    loc,
+                    exc,
+                )
 
     if new_title:
         deck_obj.proposal_title = new_title

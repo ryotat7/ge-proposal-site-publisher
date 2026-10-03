@@ -487,3 +487,56 @@ def test_reasoning_engine_adapter_stream_sync_and_async() -> None:
         assert r2.status_code == 200
         assert '"sync_chunk"' in r2.text
 
+
+def test_genai_location_routing_and_global_fallback() -> None:
+    import os
+    from app.agent import _get_genai_location, synthesize_deck_spec_with_skill
+
+    with patch.dict("os.environ", {"GOOGLE_CLOUD_LOCATION": "us-central1"}, clear=False):
+        os.environ.pop("GENAI_LOCATION", None)
+        assert _get_genai_location("gemini-3.8-flash") == "global"
+        assert _get_genai_location("antigravity-preview-05-2026") == "global"
+        assert _get_genai_location("gemini-1.5-pro") == "us-central1"
+
+    with patch.dict("os.environ", {"GENAI_LOCATION": "europe-west1"}, clear=False):
+        assert _get_genai_location("gemini-3.8-flash") == "europe-west1"
+
+    # Verify that if a regional GENAI_LOCATION fails for gemini-3.8-flash, it retries on 'global'
+    spec = _sample_deck_spec()
+    call_locations: list[str] = []
+
+    def _fake_client(*args: Any, **kwargs: Any) -> MagicMock:
+        loc = kwargs.get("location", "")
+        call_locations.append(loc)
+        c = MagicMock()
+        if loc != "global":
+            c.models.generate_content.side_effect = RuntimeError("404 Model not found in regional endpoint")
+        else:
+            resp = MagicMock()
+            resp.text = spec.model_dump_json()
+            c.models.generate_content.return_value = resp
+        return c
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "ENABLE_MANAGED_AGENTS_API": "false",
+                "GENAI_LOCATION": "us-central1",
+                "GEMINI_MODEL": "gemini-3.8-flash",
+            },
+            clear=False,
+        ),
+        patch("app.agent.genai.Client", side_effect=_fake_client),
+    ):
+        deck_out, engine = synthesize_deck_spec_with_skill(
+            client_name="株式会社アクメリテールホールディングス",
+            proposal_title="テスト提案",
+            proposal_brief="テスト概要",
+            theme_color="emerald",
+        )
+        assert call_locations == ["us-central1", "global"]
+        assert engine == "agent_platform_gemini_with_skill:gemini-3.8-flash"
+        assert deck_out.theme_color == "emerald"
+
+

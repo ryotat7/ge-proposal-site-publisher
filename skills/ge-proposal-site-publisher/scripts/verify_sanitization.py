@@ -62,6 +62,25 @@ FORBIDDEN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ),
 ]
 
+WORKING_TREE_ONLY_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    (
+        "Deprecated Anthropic/Claude Env or API",
+        re.compile(r"ANTHROPIC_" + r"API_KEY|CLAUDE_" + r"DESIGNER_MODEL|Claude\s+Managed", re.IGNORECASE),
+    ),
+    (
+        "Deprecated Firebase-Hosting Reference",
+        re.compile(r"Firebase\s+Hosting|firebase" + r"\.json", re.IGNORECASE),
+    ),
+    (
+        "Deprecated Vertex-AI Branding",
+        re.compile(r"Vertex\s+AI|VERTEX_" + r"SEARCH_", re.IGNORECASE),
+    ),
+    (
+        "Legacy Gemini 2.5 Model Reference",
+        re.compile(r"gemini-2" + r"\.5", re.IGNORECASE),
+    ),
+]
+
 SKIP_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
 
 
@@ -76,7 +95,7 @@ def scan_directory(root: Path) -> list[str]:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        for label, pattern in FORBIDDEN_PATTERNS:
+        for label, pattern in FORBIDDEN_PATTERNS + WORKING_TREE_ONLY_PATTERNS:
             for match in pattern.finditer(text):
                 line_no = text[: match.start()].count("\n") + 1
                 findings.append(

@@ -44,4 +44,5 @@ Grant the following roles to both the Compute Engine default service account (`<
 
 ## 3. Custom Domain Options
 
-The Cloud Run Hosting Gateway serves `https://<gateway>/p/<presentation_id>` directly (including custom domain mapping via Cloud Run Custom Domain Mapping or Cloud Load Balancing). *(Optional: If a zero-fixed-cost custom domain wrapper with managed SSL is desired in the future, Firebase Hosting can optionally be placed in front of the Cloud Run service via a `/p/**` rewrite rule, though it is not required for authentication or 0-second publishing.)*
+The Cloud Run Hosting Gateway serves `https://<gateway>/p/<presentation_id>` directly over managed HTTPS (`*.run.app`) and supports custom domain mapping via Cloud Run Custom Domain Mapping or Cloud Load Balancing with Google-managed SSL certificates.
+

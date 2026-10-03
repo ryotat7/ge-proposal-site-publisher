@@ -99,9 +99,9 @@ def seed_knowledge_files() -> None:
         return
     bucket_name = os.environ.get("PROPOSAL_GCS_BUCKET", f"{project_id}-proposals")
     datastore_id = os.environ.get(
-        "VERTEX_SEARCH_DATASTORE_ID", "proposal-knowledge-datastore"
+        "AGENT_SEARCH_DATASTORE_ID", "proposal-knowledge-datastore"
     )
-    location = os.environ.get("VERTEX_SEARCH_LOCATION", "global")
+    location = os.environ.get("AGENT_SEARCH_LOCATION", "global")
 
     client = storage.Client(project=project_id)
     bucket = client.bucket(bucket_name)

@@ -72,7 +72,7 @@ Set your target project variables and run `infra/deploy.sh`:
 export PROJECT_ID="your-gcp-project-id"
 export REGION="us-central1"
 export PROPOSAL_GCS_BUCKET="${PROJECT_ID}-proposal-sites"
-export VERTEX_SEARCH_DATASTORE_ID="proposal-knowledge-datastore"
+export AGENT_SEARCH_DATASTORE_ID="proposal-knowledge-datastore"
 export GE_APP_ID="your-gemini-enterprise-app-id"
 
 bash infra/deploy.sh
