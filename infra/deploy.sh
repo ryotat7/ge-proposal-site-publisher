@@ -157,8 +157,15 @@ if [[ "${SKIP_AGENT}" != "1" ]]; then
     --no-confirm-project \
     --update-env-vars="PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},GENAI_LOCATION=global,GEMINI_MODEL=${GEMINI_MODEL},MANAGED_AGENT_MODEL=${MANAGED_AGENT_MODEL},MANAGED_AGENT_DEADLINE_SECONDS=${MANAGED_AGENT_DEADLINE_SECONDS},PROPOSAL_GCS_BUCKET=${PROPOSAL_GCS_BUCKET},PROPOSAL_FIRESTORE_COLLECTION=${PROPOSAL_FIRESTORE_COLLECTION},HOSTING_BASE_URL=${HOSTING_BASE_URL},AGENT_SEARCH_DATASTORE_ID=${AGENT_SEARCH_DATASTORE_ID},AGENT_SEARCH_LOCATION=global,PROPOSAL_BRAND_NAME=${PROPOSAL_BRAND_NAME},PROPOSAL_BRAND_BADGE=${PROPOSAL_BRAND_BADGE},GENERATION_JOB_NAME=${GENERATION_JOB_NAME},GENERATION_TRIGGER_MODE=auto"
 
+  # GE_APP_ID must be the FULL engine resource name (agents-cli >= 1.4.0):
+  #   projects/<project-number>/locations/global/collections/default_collection/engines/<engine-id>
+  # NOTE: `agents-cli publish` always creates a NEW agent registration. To change the description of an
+  # existing registration in place, PATCH the Discovery Engine agent resource (see SKILL.md, gotcha 10).
   if [[ -n "${GE_APP_ID:-}" ]]; then
-    echo "==> Publishing agent to Gemini Enterprise (App ID: ${GE_APP_ID})..."
+    if [[ "${GE_APP_ID}" != projects/* ]]; then
+      GE_APP_ID="projects/${PROJECT_NUMBER}/locations/global/collections/default_collection/engines/${GE_APP_ID}"
+    fi
+    echo "==> Publishing agent to Gemini Enterprise (App: ${GE_APP_ID})..."
     agents-cli publish gemini-enterprise \
       --project-id="${PROJECT_ID}" \
       --gemini-enterprise-app-id="${GE_APP_ID}" \

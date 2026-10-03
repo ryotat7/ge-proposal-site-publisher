@@ -116,8 +116,9 @@ python3 skills/ge-proposal-site-publisher/scripts/verify_sanitization.py .
 ```bash
 export PROJECT_ID="your-gcp-project-id"
 export REGION="us-central1"
-# Optional: Automatically register with an existing Gemini Enterprise App
-# export GE_APP_ID="your-gemini-enterprise-app-id"
+# Optional (first deployment only): register with an existing Gemini Enterprise app.
+# Full engine resource name required by agents-cli >= 1.4.0 (a bare engine id is expanded automatically):
+# export GE_APP_ID="projects/<project-number>/locations/global/collections/default_collection/engines/<engine-id>"
 
 bash infra/deploy.sh
 # Phases: APIs/IAM → bucket → Firestore → Agent Search seed → Cloud Run gateway

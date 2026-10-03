@@ -71,6 +71,8 @@ End-to-end engineering blueprint and automation skill for deploying an interacti
    - `client.interactions.create(agent=MANAGED_AGENT_MODEL, input=prompt, environment={"type": "remote"}, background=True, store=True, stream=False)` on `location="global"`, then poll `client.interactions.get(id)` until `status == "completed"` and read `output_text`. There is **no** `config=` keyword — passing one raises `TypeError: create() got unexpected keyword argument(s): config`. Cancel with `client.interactions.cancel(id)` when the deadline passes.
 9. **Browser Polling Must Reuse the Session Cookie**:
    - The 'generating' page calls `fetch('/p/<id>/status', {credentials: 'same-origin'})`; the gateway sets the HMAC session cookie on the first Basic-auth response so the status poll and the final reload never prompt for credentials again. The `/status` endpoint is itself authenticated (401 without cookie/Basic) and served with `Cache-Control: no-store`.
+10. **Gemini Enterprise Registration Is Create-Only**:
+   - `agents-cli publish gemini-enterprise` (v1.4.0+) requires the full engine resource name (`projects/<project-number>/locations/global/collections/default_collection/engines/<engine-id>`) and always creates a *new* agent registration. Because the registration points at the Reasoning Engine resource, re-deploying the agent with `agents-cli deploy` updates the live GE agent in place — do **not** re-publish on every deploy. To change the display text of an existing registration, `PATCH https://discoveryengine.googleapis.com/v1alpha/<agent-name>?updateMask=description,adkAgentDefinition.toolSettings.toolDescription`.
 
 ## 3. Step-by-Step Deployment Recipe
 

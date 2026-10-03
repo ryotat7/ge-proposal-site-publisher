@@ -137,10 +137,12 @@ def main() -> int:
     assert not r2["errors"], f"agent errors: {r2['errors']}"
     final_text = r2["final_text"]
     assert final_text, "turn 2 ended with EMPTY final text (the original GE stall symptom)"
-    url_match = re.search(r"https://\S+/p/(prop-\d{8}-[0-9a-f]{8})", final_text)
+    # Markdown links render as [url](url); never let the greedy match swallow "](".
+    url_match = re.search(r"https://[^\s\]\)]+/p/(prop-\d{8}-[0-9a-f]{8})", final_text)
     assert url_match, "final text does not contain the share URL"
     pres_id = url_match.group(1)
-    share_url = url_match.group(0).rstrip(").,、。」")
+    share_url = (created or {}).get("share_url") or url_match.group(0).rstrip(").,、。」")
+    assert share_url.endswith(f"/p/{pres_id}"), f"share_url mismatch: {share_url}"
     viewer_id = (created or {}).get("viewer_id") or ""
     password = (created or {}).get("viewer_password") or ""
     if not viewer_id:
