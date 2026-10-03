@@ -74,7 +74,7 @@ def _sample_deck_spec(theme_color: str = "sky") -> PresentationDeckSpec:
             ),
         ],
         executive_conclusion=(
-            "UXデザイン知見とGoogle Cloud (BigQuery + Vertex AI Agent Runtime) を融合し、"
+            "UXデザイン知見とGoogle Cloud (BigQuery + Agent Runtime) を融合し、"
             "最短2ヶ月で『対話型AIコンシェルジュ』と『自律型マーケティング基盤』を立ち上げます。"
         ),
         before_state=[
@@ -111,13 +111,13 @@ def _sample_deck_spec(theme_color: str = "sky") -> PresentationDeckSpec:
             ArchitectureNode(
                 layer_name="2. 認証・軽量配信基盤層",
                 icon="fa-shield-halved",
-                components=["Firebase Hosting", "Cloud Run 認証GW", "Firestore セッション管理"],
+                components=["Cloud Run 認証GW", "Firestore セッション管理", "非公開 Cloud Storage"],
                 description="外部顧客・パートナー向けにセキュアかつ軽量なWeb配信と認証を提供。",
             ),
             ArchitectureNode(
                 layer_name="3. AIエージェント実行層",
                 icon="fa-brain",
-                components=["Vertex AI Agent Runtime", "Gemini Enterprise", "Vertex AI Search"],
+                components=["Agent Runtime", "Gemini Enterprise", "Agent Search"],
                 description="ADKマルチエージェントが社内知識を検索し、高度な推論とコンテンツ生成を実行。",
             ),
             ArchitectureNode(
@@ -133,7 +133,7 @@ def _sample_deck_spec(theme_color: str = "sky") -> PresentationDeckSpec:
                 period="Month 1 - 2",
                 deliverables=[
                     "カスタマージャーニー設計と優先ユースケース定義",
-                    "BigQuery CDPへの初期データ連携とVertex AI Search構築",
+                    "BigQuery CDPへの初期データ連携とAgent Search構築",
                     "AIエージェントのプロトタイプ実装・社内検証",
                 ],
                 milestone="プロトタイプ合意・PoC効果測定完了",

@@ -2,7 +2,7 @@
 # Copyright 2026 Google LLC
 # SPDX-License-Identifier: Apache-2.0
 
-"""Seeds synthetic RFP and past proposal reference documents into Cloud Storage and Vertex AI Search."""
+"""Seeds synthetic RFP and past proposal reference documents into Cloud Storage and Agent Search."""
 
 from __future__ import annotations
 
@@ -28,11 +28,11 @@ Acme Retail Holdings operates 140 physical stores and an e-commerce platform wit
     "knowledge/case_study_global_financial_cx.md": """# Case Study: Global Financial Corp - Enterprise Data Platform & AI Advisor
 
 ## 1. Solution Summary
-Unified customer touchpoint logs in BigQuery and deployed a grounded ADK multi-agent concierge on Vertex AI Agent Runtime.
+Unified customer touchpoint logs in BigQuery and deployed a grounded ADK multi-agent concierge on Agent Runtime (Gemini Enterprise Agent Platform).
 
 ## 2. Architecture Highlights
 - Layer 1 (Channels): Web Portal, Mobile App, Contact Center Desktop
-- Layer 2 (AI Agent Runtime): Google ADK Concierge + Vertex AI Search Grounding
+- Layer 2 (AI Agent Runtime): Google ADK Concierge + Agent Search Grounding
 - Layer 3 (Unified Data): BigQuery Customer 360 + Real-time Feature Store
 - Layer 4 (Governance): Cloud Armor, IAM Least Privilege, Private Cloud Storage
 
@@ -61,14 +61,14 @@ STRUCTURED_RECORDS: list[dict[str, str]] = [
         "industry": "Retail & E-Commerce",
         "summary": (
             "Unifies mobile app, e-commerce, and physical POS data into a real-time BigQuery CDP. "
-            "Deploys a conversational Gemini 2.5 Flash agent on Vertex AI Agent Runtime for hyper-personalized "
+            "Deploys a conversational Gemini 3.8 Flash agent on Agent Runtime (Gemini Enterprise Agent Platform) for hyper-personalized "
             "styling recommendations and automated marketing campaign execution."
         ),
         "key_metrics": "Repeat purchase CVR +28%, Omnichannel member LTV +22%, Campaign production effort -65%",
         "recommended_architecture": (
             "Layer 1: Omnichannel Touchpoints (Mobile App / LINE / Web) -> "
-            "Layer 2: Auth & Delivery Gateway (Cloud Run / Firebase Hosting) -> "
-            "Layer 3: AI Agent Runtime (Vertex AI Agent Runtime / Gemini Enterprise / Vertex AI Search) -> "
+            "Layer 2: Auth & Delivery Gateway (Cloud Run + Private Cloud Storage + Firestore) -> "
+            "Layer 3: AI Agent Runtime (Agent Runtime / Gemini Enterprise / Agent Search) -> "
             "Layer 4: Unified Data Platform (BigQuery CDP / Private Cloud Storage / Firestore)"
         ),
     },
@@ -78,14 +78,14 @@ STRUCTURED_RECORDS: list[dict[str, str]] = [
         "client_name": "Global Financial Corp",
         "industry": "Financial Services",
         "summary": (
-            "Integrates product prospectuses, market research, and CRM history via Vertex AI Search "
+            "Integrates product prospectuses, market research, and CRM history via Agent Search "
             "to power an interactive client proposal concierge with strict IAM and audit logging."
         ),
         "key_metrics": "Digital inquiry self-resolution +34%, Proposal preparation time -65%, Advisor NPS +19pt",
         "recommended_architecture": (
             "Layer 1: Advisor & Client Portal -> "
             "Layer 2: Cloud Run Zero-Trust Auth Gateway -> "
-            "Layer 3: ADK Concierge Agent + Vertex AI Search -> "
+            "Layer 3: ADK Concierge Agent + Agent Search -> "
             "Layer 4: BigQuery Customer 360 + Firestore Audit Trail"
         ),
     },
@@ -134,9 +134,9 @@ def seed_knowledge_files() -> None:
 
         try:
             ds_client.get_data_store(name=datastore_name)
-            print(f"Vertex AI Search DataStore already exists: {datastore_name}")
+            print(f"Agent Search DataStore already exists: {datastore_name}")
         except exceptions.NotFound:
-            print(f"Creating Vertex AI Search DataStore: {datastore_name}...")
+            print(f"Creating Agent Search DataStore: {datastore_name}...")
             ds = discoveryengine.DataStore(
                 display_name="Proposal Knowledge DataStore",
                 industry_vertical=discoveryengine.IndustryVertical.GENERIC,
@@ -169,11 +169,11 @@ def seed_knowledge_files() -> None:
                     document=doc,
                     allow_missing=True,
                 )
-                print(f"Seeded Vertex AI Search document: {doc_id}")
+                print(f"Seeded Agent Search document: {doc_id}")
             except Exception as doc_exc:
                 print(f"Warning: could not seed document {doc_id}: {doc_exc}")
     except Exception as exc:
-        print(f"Warning: Vertex AI Search datastore seeding skipped: {exc}")
+        print(f"Warning: Agent Search datastore seeding skipped: {exc}")
 
 
 if __name__ == "__main__":

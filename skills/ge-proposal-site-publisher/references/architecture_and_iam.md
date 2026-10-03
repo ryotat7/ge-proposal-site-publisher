@@ -34,10 +34,14 @@ Each successful viewer authentication appends a document containing:
 
 ## 2. Required IAM Roles
 
-Grant the following roles to both the Compute Engine default service account (`<PROJECT_NUMBER>-compute@developer.gserviceaccount.com`) and the Vertex AI Reasoning Engine service agent (`service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`):
+Grant the following roles to both the Compute Engine default service account (`<PROJECT_NUMBER>-compute@developer.gserviceaccount.com`) and the Agent Runtime Reasoning Engine service agent (`service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`):
 
 - `roles/storage.objectAdmin` on `gs://<PROPOSAL_GCS_BUCKET>` (Bucket-level)
 - `roles/datastore.user` (Project-level, for Firestore read/write)
-- `roles/discoveryengine.viewer` (Project-level, for Vertex AI Search grounding)
-- `roles/aiplatform.user` (Project-level, for Gemini / Managed Agents API calls)
+- `roles/discoveryengine.viewer` (Project-level, for Agent Search grounding)
+- `roles/aiplatform.user` (Project-level, for Agent Platform Gemini / Managed Agents API calls)
 - `roles/serviceusage.serviceUsageConsumer` (Project-level, for quota project checks)
+
+## 3. Custom Domain Options
+
+The Cloud Run Hosting Gateway serves `https://<gateway>/p/<presentation_id>` directly (including custom domain mapping via Cloud Run Custom Domain Mapping or Cloud Load Balancing). *(Optional: If a zero-fixed-cost custom domain wrapper with managed SSL is desired in the future, Firebase Hosting can optionally be placed in front of the Cloud Run service via a `/p/**` rewrite rule, though it is not required for authentication or 0-second publishing.)*

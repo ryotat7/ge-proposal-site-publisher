@@ -11,7 +11,7 @@ description: >-
 
 # Interactive Slide Designer Skill
 
-Produces Claude Code-grade, single-file interactive HTML5 slide decks (`index.html`) tailored to each client's industry, visual tone, and strategic narrative.
+Produces executive-grade, single-file interactive HTML5 slide decks (`index.html`) tailored to each client's industry, visual tone, and strategic narrative.
 
 ## 1. Non-Negotiable Structural Contract
 

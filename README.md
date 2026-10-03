@@ -6,11 +6,11 @@
 
 **English** | **[日本語 (Japanese)](#日本語ガイド-japanese)**
 
-An end-to-end reference implementation and reusable Agent Skill suite for building an **Interactive Proposal Website Concierge Agent** on **Google Cloud (Gemini Enterprise + Vertex AI Agent Runtime + Cloud Run + Cloud Storage + Firestore)**.
+An end-to-end reference implementation and reusable Agent Skill suite for building an **Interactive Proposal Website Concierge Agent** on **Google Cloud (Gemini Enterprise + Agent Runtime on Gemini Enterprise Agent Platform + Cloud Run + Cloud Storage + Firestore)**.
 
 Unlike static one-shot slide generators, `root_agent` operates as an **Interactive Proposal Concierge (`LlmAgent`)** that:
-1. **Consults Conversationally First**: Greets users naturally (never generating slides prematurely on `"Hello"` or `"こんにちは"`), searches internal knowledge via Vertex AI Search (`search_internal_knowledge`), and collaborates on a 6-slide narrative outline.
-2. **Generates Bespoke 6-Slide Interactive HTML5 Websites**: Loads the embedded **`interactive-slide-designer`** `SKILL.md` (`antigravity-preview-05-2026` / Vertex AI Gemini 2.5) to produce a self-contained, 16:9 responsive HTML5 presentation deck with 6 distinct layout archetypes (`hero-cover`, `bento-executive-summary`, `as-is-to-be-comparison`, `architecture-flow`, `roadmap-timeline`, `roi-and-next-steps`) and 5 executive color themes (`sky`, `emerald`, `violet`, `amber`, `rose`).
+1. **Consults Conversationally First**: Greets users naturally (never generating slides prematurely on `"Hello"` or `"こんにちは"`), searches internal knowledge via Agent Search on Gemini Enterprise Agent Platform (`search_internal_knowledge`), and collaborates on a 6-slide narrative outline.
+2. **Generates Bespoke 6-Slide Interactive HTML5 Websites**: Loads the embedded **`interactive-slide-designer`** `SKILL.md` (`antigravity-preview-05-2026` / Gemini 3.8 Flash on Gemini Enterprise Agent Platform) to produce a self-contained, 16:9 responsive HTML5 presentation deck with 6 distinct layout archetypes (`hero-cover`, `bento-executive-summary`, `as-is-to-be-comparison`, `architecture-flow`, `roadmap-timeline`, `roi-and-next-steps`) and 5 executive color themes (`sky`, `emerald`, `violet`, `amber`, `rose`).
 3. **Publishes Behind Zero-Trust Per-Client Authentication**: Uploads the HTML5 deck to a **private Cloud Storage bucket** (`publicAccessPrevention: enforced`), stores PBKDF2-HMAC-SHA256 (`120,000` iterations) credentials in **Firestore**, and serves external clients through a **Cloud Run Authentication & Audit Gateway**.
 4. **Manages the Full Post-Publication Lifecycle in Chat**: Supports conversational slide editing (`edit_proposal_website`), portfolio listing (`list_proposal_websites`), client access log auditing (`get_proposal_access_logs`), password rotation & expiration extension (`manage_proposal_credentials`), and instant revocation (`delete_proposal_website`).
 
@@ -24,7 +24,7 @@ flowchart TB
         GE["Gemini Enterprise Chat UI<br/>(Interactive Concierge Session)"]
     end
 
-    subgraph AgentRuntime["Vertex AI Agent Runtime (Google ADK)"]
+    subgraph AgentRuntime["Agent Runtime on Gemini Enterprise Agent Platform (Google ADK)"]
         Concierge["root_agent: Interactive Proposal Concierge (LlmAgent)<br/>Loaded Skill: interactive-slide-designer/SKILL.md"]
         T1["search_internal_knowledge"]
         T2["create_proposal_website"]
@@ -35,7 +35,7 @@ flowchart TB
     end
 
     subgraph DataLayer["Private Data & Storage Layer"]
-        VAS[("Vertex AI Search<br/>Past RFPs & Case Studies")]
+        VAS[("Agent Search<br/>Past RFPs & Case Studies")]
         GCS[("Private Cloud Storage<br/>presentations/{id}/index.html<br/>publicAccessPrevention=enforced")]
         FS[("Cloud Firestore<br/>presentations/{id}<br/>+ access_logs subcollection")]
     end
@@ -80,8 +80,7 @@ ge-proposal-site-publisher/
 ├── hosting_gateway/                       # Cloud Run Auth & Private GCS Streaming Proxy
 │   ├── main.py                            # /health, /healthz, /p/{id}, /p/{id}/auth
 │   ├── Dockerfile
-│   ├── requirements.txt
-│   └── firebase.json
+│   └── requirements.txt
 ├── infra/
 │   ├── deploy.sh                          # One-command GCP provisioning & deployment
 │   ├── cleanup.sh                         # Teardown helper
@@ -137,8 +136,8 @@ uv run --project proposal_agent python tests/run_live_e2e_verification.py
    - 過去のRFPや導入事例を `search_internal_knowledge` で検索し、6枚構成のアウトライン案を提示して合意形成してからWebサイトを発行します（即時生成を求められた場合はワンショット発行にも対応）。
 2. **`interactive-slide-designer` スキルによる高品質6枚構成HTML5デッキ**:
    - 全6スライドがそれぞれ異なる専用レイアウト（`hero-cover` / `bento-executive-summary` / `as-is-to-be-comparison` / `architecture-flow` / `roadmap-timeline` / `roi-and-next-steps`）と5種類のカラーテーマ（`sky` / `emerald` / `violet` / `amber` / `rose`）を備え、キーボード（`←` / `→` / `F`）・スワイプ・印刷出力に対応します。
-   - Google Cloud / Vertex AI Managed Agents API（`antigravity-preview-05-2026`、`locations/global` の Interactions API）および Vertex AI Gemini 2.5 の両方に対応しています。
-3. **非公開Cloud Storage + Cloud Run認証ゲートウェイによるセキュア限定公開**:
+   - Gemini Enterprise Agent Platform の Managed Agents API（`antigravity-preview-05-2026`、`locations/global` の Interactions API）および Agent Platform Gemini 3.8 Flash（`gemini-3.8-flash`）の両方に対応しています。
+3. **Cloud Run認証ゲートウェイ ＋ 非公開Cloud Storage ＋ Firestoreによるセキュア限定公開**:
    - 生成されたHTMLはパブリックアクセスを完全遮断（`publicAccessPrevention: enforced`）した非公開GCSバケットに保存され、案件ごとに自動発行される閲覧ID・パスワード（PBKDF2-HMAC-SHA256 12万回ストレッチング）を知るクライアントのみがCloud Run経由で閲覧できます。
 4. **発行後のフルライフサイクル管理（7つの専用ツール）**:
    - `search_internal_knowledge`: 社内ナレッジ・過去提案事例の検索

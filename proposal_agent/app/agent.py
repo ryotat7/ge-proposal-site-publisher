@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 MANAGED_AGENT_MODEL = os.environ.get(
     "MANAGED_AGENT_MODEL", "antigravity-preview-05-2026"
 )
@@ -59,6 +59,13 @@ def _get_project_id() -> str:
 
 def _get_location() -> str:
     return os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+
+
+def _get_genai_location(model_name: str | None = None) -> str:
+    target = (model_name or MODEL).lower()
+    if target.startswith("gemini-3") or target.startswith("antigravity"):
+        return "global"
+    return _get_location()
 
 
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
@@ -374,7 +381,7 @@ def _default_deck_spec_from_brief(
             ),
         ],
         executive_conclusion=(
-            f"{_get_brand_name()}のUXデザイン知見とGoogle Cloud (BigQuery + Vertex AI + Gemini Enterprise) を融合し、"
+            f"{_get_brand_name()}のUXデザイン知見とGoogle Cloud (BigQuery + Gemini Enterprise Agent Platform + Gemini Enterprise) を融合し、"
             f"{clean_client}様の対話型AI体験とマーケティング自律化を最短2ヶ月で実現します。"
         )[:120],
         before_state=[
@@ -411,13 +418,13 @@ def _default_deck_spec_from_brief(
             ArchitectureNode(
                 layer_name="2. 認証・軽量配信基盤層",
                 icon="fa-shield-halved",
-                components=["Firebase Hosting", "Cloud Run 認証GW", "Firestore セッション管理"],
+                components=["Cloud Run 認証GW", "Firestore セッション管理", "非公開 Cloud Storage"],
                 description="取引先・顧客向けにセキュアかつゼロ遅延なWeb配信とアクセス制御を提供。",
             ),
             ArchitectureNode(
                 layer_name="3. AIエージェント実行層",
                 icon="fa-brain",
-                components=["Vertex AI Agent Runtime", "Gemini Enterprise", "Vertex AI Search"],
+                components=["Agent Runtime", "Gemini Enterprise", "Agent Search"],
                 description="ADKエージェントとデザインSkillが社内知識を検索し高度な推論・生成を実行。",
             ),
             ArchitectureNode(
@@ -433,7 +440,7 @@ def _default_deck_spec_from_brief(
                 period="Month 1 - 2",
                 deliverables=[
                     "カスタマージャーニー設計と優先ユースケース定義",
-                    "BigQuery・Vertex AI Searchへの初期データ統合",
+                    "BigQuery・Agent Searchへの初期データ統合",
                     "AIエージェントのプロトタイプ実装と社内検証",
                 ],
                 milestone="プロトタイプ合意・PoC効果測定完了",
@@ -503,7 +510,7 @@ def synthesize_deck_spec_with_skill(
 {skill_text}
 """
     project_id = _get_project_id()
-    location = _get_location()
+    genai_location = _get_genai_location(MODEL)
 
     if os.environ.get("ENABLE_MANAGED_AGENTS_API", "true").lower() in ("true", "1"):
         try:
@@ -528,14 +535,16 @@ def synthesize_deck_spec_with_skill(
                 return deck_obj, f"managed_agents_api:{MANAGED_AGENT_MODEL}"
         except Exception as exc:
             logger.info(
-                "Managed Agents API (%s) fallback to Vertex AI Gemini (%s): %s",
+                "Managed Agents API (%s) fallback to Agent Platform Gemini (%s): %s",
                 MANAGED_AGENT_MODEL,
                 MODEL,
                 exc,
             )
 
     try:
-        client = genai.Client(vertexai=True, project=project_id, location=location)
+        client = genai.Client(
+            vertexai=True, project=project_id, location=genai_location
+        )
         resp = client.models.generate_content(
             model=MODEL,
             contents=prompt,
@@ -548,7 +557,7 @@ def synthesize_deck_spec_with_skill(
         if resp.text:
             deck_obj = PresentationDeckSpec.model_validate_json(resp.text)
             deck_obj.theme_color = theme
-            return deck_obj, f"vertex_gemini_with_skill:{MODEL}"
+            return deck_obj, f"agent_platform_gemini_with_skill:{MODEL}"
     except Exception as exc:
         logger.warning("Gemini structured synthesis fallback triggered: %s", exc)
 
@@ -564,12 +573,12 @@ def synthesize_deck_spec_with_skill(
 
 
 # ---------------------------------------------------------------------------
-# Tool 1: Vertex AI Search (Discovery Engine) Knowledge Search Tool
+# Tool 1: Agent Search (Discovery Engine) Knowledge Search Tool
 # ---------------------------------------------------------------------------
 
 
 def search_internal_knowledge(query: str) -> str:
-    """Searches internal Vertex AI Search datastore for past proposals, RFPs, case studies, and CRM context."""
+    """Searches internal Agent Search datastore for past proposals, RFPs, case studies, and CRM context."""
     project_id = _get_project_id()
     location = _get_datastore_location()
     datastore_id = _get_datastore_id()
@@ -633,7 +642,7 @@ def search_internal_knowledge(query: str) -> str:
                 }
             )
     except Exception as exc:
-        logger.warning("Vertex AI Search query fallback triggered: %s", exc)
+        logger.warning("Agent Search query fallback triggered: %s", exc)
 
     if not results_list:
         results_list = [
@@ -643,15 +652,15 @@ def search_internal_knowledge(query: str) -> str:
                 "client_name": query,
                 "industry": "リテール・流通・金融・B2Bサービス",
                 "summary": (
-                    "会員アプリ・EC・店舗POSの分断された顧客データをGoogle Cloud (BigQuery + Vertex AI) 上の"
+                    "会員アプリ・EC・店舗POSの分断された顧客データをGoogle Cloud (BigQuery + Gemini Enterprise Agent Platform) 上の"
                     "リアルタイムデータ基盤に統合。対話型AIエージェントにより、"
                     "顧客一人ひとりの購買文脈に合わせたパーソナライズ接客とマーケティング施策の自動生成を実現。"
                 ),
                 "key_metrics": "リピート購買転換率(CVR) +28%向上、LTV +22%伸長、キャンペーン制作・運用工数 65%削減",
                 "recommended_architecture": (
                     "Layer 1: マルチチャネル接点(会員アプリ/Web/店舗端末) -> "
-                    "Layer 2: 認証・配信基盤(Cloud Run / Firebase Hosting) -> "
-                    "Layer 3: AIエージェント基盤(Vertex AI Agent Runtime / Gemini Enterprise / Vertex AI Search) -> "
+                    "Layer 2: 認証・配信基盤(Cloud Run / 非公開 Cloud Storage / Firestore) -> "
+                    "Layer 3: AIエージェント基盤(Agent Runtime / Gemini Enterprise / Agent Search) -> "
                     "Layer 4: 統合データ基盤(BigQuery / Cloud Storage / Firestore)"
                 ),
             }
@@ -894,7 +903,11 @@ def edit_proposal_website(
         "ENABLE_LLM_DECK_EDIT", "true"
     ).lower() in ("true", "1"):
         try:
-            client = genai.Client(vertexai=True, project=project_id, location=location)
+            client = genai.Client(
+                vertexai=True,
+                project=project_id,
+                location=_get_genai_location(MODEL),
+            )
             html_excerpt = existing_html[:1500] if existing_html else "(Not cached)"
             edit_prompt = f"""既存の6枚構成プレゼンテーションデータ（JSON）およびCloud Storage上の現行HTMLに対して、ユーザーの修正指示を反映した新しい `PresentationDeckSpec` JSONを出力してください。
 変更指示がないフィールドは既存の値を維持してください。
@@ -1288,6 +1301,7 @@ root_agent = LlmAgent(
     name="proposal_site_publisher_agent",
     model=Gemini(
         model=MODEL,
+        client_kwargs={"location": _get_genai_location(MODEL)},
         retry_options=types.HttpRetryOptions(attempts=3),
     ),
     description=(

@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # End-to-end deployment script for the Interactive Proposal Site Publisher
-# on Google Cloud (Cloud Storage, Firestore, Vertex AI Search, Cloud Run,
-# Vertex AI Agent Runtime, and Gemini Enterprise).
+# on Google Cloud (Cloud Storage, Firestore, Agent Search, Cloud Run,
+# Agent Runtime on Gemini Enterprise Agent Platform, and Gemini Enterprise).
 
 set -euo pipefail
 
@@ -74,7 +74,7 @@ if ! gcloud firestore databases describe --database="(default)" --project="${PRO
     --project="${PROJECT_ID}"
 fi
 
-echo "==> [4/6] Seeding sample knowledge documents into Vertex AI Search datastore (${VERTEX_SEARCH_DATASTORE_ID})..."
+echo "==> [4/6] Seeding sample knowledge documents into Agent Search datastore (${VERTEX_SEARCH_DATASTORE_ID})..."
 PROJECT_ID="${PROJECT_ID}" \
 PROPOSAL_GCS_BUCKET="${PROPOSAL_GCS_BUCKET}" \
 VERTEX_SEARCH_DATASTORE_ID="${VERTEX_SEARCH_DATASTORE_ID}" \
@@ -99,13 +99,13 @@ HOSTING_BASE_URL="$(gcloud run services describe "${GATEWAY_SERVICE_NAME}" \
   --format='value(status.url)')"
 echo "    Hosting Gateway live at: ${HOSTING_BASE_URL}"
 
-echo "==> [6/6] Deploying ADK Interactive Proposal Concierge Agent to Vertex AI Agent Runtime..."
+echo "==> [6/6] Deploying ADK Interactive Proposal Concierge Agent to Agent Runtime..."
 cd "${REPO_ROOT}/proposal_agent"
 agents-cli deploy \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
   --no-confirm-project \
-  --update-env-vars="PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},GEMINI_MODEL=gemini-2.5-flash,PROPOSAL_GCS_BUCKET=${PROPOSAL_GCS_BUCKET},PROPOSAL_FIRESTORE_COLLECTION=${PROPOSAL_FIRESTORE_COLLECTION},HOSTING_BASE_URL=${HOSTING_BASE_URL},VERTEX_SEARCH_DATASTORE_ID=${VERTEX_SEARCH_DATASTORE_ID},VERTEX_SEARCH_LOCATION=global,PROPOSAL_BRAND_NAME=${PROPOSAL_BRAND_NAME},PROPOSAL_BRAND_BADGE=${PROPOSAL_BRAND_BADGE}"
+  --update-env-vars="PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},GEMINI_MODEL=gemini-3.8-flash,PROPOSAL_GCS_BUCKET=${PROPOSAL_GCS_BUCKET},PROPOSAL_FIRESTORE_COLLECTION=${PROPOSAL_FIRESTORE_COLLECTION},HOSTING_BASE_URL=${HOSTING_BASE_URL},VERTEX_SEARCH_DATASTORE_ID=${VERTEX_SEARCH_DATASTORE_ID},VERTEX_SEARCH_LOCATION=global,PROPOSAL_BRAND_NAME=${PROPOSAL_BRAND_NAME},PROPOSAL_BRAND_BADGE=${PROPOSAL_BRAND_BADGE}"
 
 if [[ -n "${GE_APP_ID:-}" ]]; then
   echo "==> Publishing agent to Gemini Enterprise (App ID: ${GE_APP_ID})..."
