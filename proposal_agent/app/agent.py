@@ -817,6 +817,7 @@ def create_proposal_website(
     }
     if tool_context is not None:
         tool_context.state["published_result"] = result
+        tool_context.state["published_presentation"] = result
     return result
 
 
@@ -859,6 +860,23 @@ def edit_proposal_website(
         raise ValueError(f"Presentation '{presentation_id}' not found in Firestore.")
 
     doc_data = doc_snap.to_dict() or {}
+    bucket_name = doc_data.get("gcs_bucket") or _get_bucket_name()
+    blob_path = (
+        doc_data.get("gcs_blob_path") or f"presentations/{presentation_id}/index.html"
+    )
+    storage_client = storage.Client(project=project_id)
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_path)
+
+    existing_html = ""
+    try:
+        if hasattr(blob, "download_as_text"):
+            existing_html = blob.download_as_text(encoding="utf-8")
+        elif hasattr(blob, "download_as_bytes"):
+            existing_html = blob.download_as_bytes().decode("utf-8", errors="replace")
+    except Exception as exc:
+        logger.info("Existing HTML blob read skipped or unavailable: %s", exc)
+
     raw_spec = doc_data.get("deck_spec")
     if raw_spec:
         deck_obj = PresentationDeckSpec.model_validate(raw_spec)
@@ -877,8 +895,12 @@ def edit_proposal_website(
     ).lower() in ("true", "1"):
         try:
             client = genai.Client(vertexai=True, project=project_id, location=location)
-            edit_prompt = f"""既存の6枚構成プレゼンテーションデータ（JSON）に対して、ユーザーの修正指示を反映した新しい `PresentationDeckSpec` JSONを出力してください。
+            html_excerpt = existing_html[:1500] if existing_html else "(Not cached)"
+            edit_prompt = f"""既存の6枚構成プレゼンテーションデータ（JSON）およびCloud Storage上の現行HTMLに対して、ユーザーの修正指示を反映した新しい `PresentationDeckSpec` JSONを出力してください。
 変更指示がないフィールドは既存の値を維持してください。
+
+【Cloud Storage上の現行HTML抜粋 ({blob_path})】:
+{html_excerpt}
 
 【現在のPresentationDeckSpec JSON】:
 {json.dumps(deck_obj.model_dump(), ensure_ascii=False, indent=2)}
@@ -930,13 +952,6 @@ def edit_proposal_website(
         generated_date=now_jst.strftime("%Y-%m-%d %H:%M JST (Updated)"),
     )
 
-    bucket_name = doc_data.get("gcs_bucket") or _get_bucket_name()
-    blob_path = (
-        doc_data.get("gcs_blob_path") or f"presentations/{presentation_id}/index.html"
-    )
-    storage_client = storage.Client(project=project_id)
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(blob_path)
     blob.cache_control = "no-store, private"
     blob.upload_from_string(
         html_content.encode("utf-8"),
@@ -964,6 +979,7 @@ def edit_proposal_website(
         "theme_color": deck_obj.theme_color,
         "custom_callout": deck_obj.custom_callout,
         "updated_fields": updated_fields,
+        "existing_html_loaded": bool(existing_html),
         "share_url": share_url,
         "updated_at": now_utc.isoformat(),
         "slide_outline": _build_slide_outline(deck_obj),

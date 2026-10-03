@@ -117,7 +117,9 @@ async def run_e2e() -> None:
     updated_session = await session_service.get_session(
         app_name=app_name, user_id=user_id, session_id=session.id
     )
-    published = updated_session.state.get("published_presentation")
+    published = updated_session.state.get(
+        "published_result"
+    ) or updated_session.state.get("published_presentation")
     assert published and published.get("status") == "PUBLISHED"
 
     presentation_id = published["presentation_id"]

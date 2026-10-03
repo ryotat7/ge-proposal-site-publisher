@@ -249,6 +249,9 @@ def test_full_lifecycle_create_edit_list_logs_credentials_and_delete() -> None:
                     )
                 )
                 blob.download_as_bytes.side_effect = lambda: gcs_store[key]
+                blob.download_as_text.side_effect = (
+                    lambda encoding="utf-8": gcs_store[key].decode(encoding)
+                )
                 blob.exists.side_effect = lambda: key in gcs_store
                 blob.delete.side_effect = lambda: gcs_store.pop(key, None)
                 return blob
@@ -329,6 +332,8 @@ def test_full_lifecycle_create_edit_list_logs_credentials_and_delete() -> None:
         created = publish_presentation(mock_ctx)
         pres_id = created["presentation_id"]
         assert created["status"] == "PUBLISHED"
+        assert mock_ctx.state["published_result"]["presentation_id"] == pres_id
+        assert mock_ctx.state["published_presentation"]["presentation_id"] == pres_id
         assert len(created["slide_outline"]) == 6
 
         edited = edit_proposal_website(
@@ -339,6 +344,7 @@ def test_full_lifecycle_create_edit_list_logs_credentials_and_delete() -> None:
             tool_context=mock_ctx,
         )
         assert edited["status"] == "UPDATED"
+        assert edited["existing_html_loaded"] is True
         assert edited["theme_color"] == "emerald"
         assert edited["proposal_title"] == "【改訂版】次世代OMO顧客体験変革のご提案"
 
@@ -435,3 +441,49 @@ def test_login_html_escapes_xss_payloads() -> None:
     )
     assert '<script>alert("xss")</script>' not in rendered
     assert "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;" in rendered
+
+
+def test_reasoning_engine_adapter_stream_sync_and_async() -> None:
+    from fastapi import FastAPI
+    from app.app_utils.reasoning_engine_adapter import attach_reasoning_engine_routes
+
+    class _FakeAdkApp:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def set_up(self) -> None:
+            pass
+
+        def register_operations(self) -> dict[str, list[str]]:
+            return {
+                "": ["get_session"],
+                "async": ["async_get_session"],
+                "stream": ["stream_query", "sync_only_stream"],
+                "async_stream": ["async_stream_query"],
+            }
+
+        def sync_only_stream(self, **kwargs: Any):
+            yield {"event": "sync_chunk", "echo": kwargs.get("message")}
+
+        async def async_stream_query(self, **kwargs: Any):
+            yield {"event": "async_chunk", "echo": kwargs.get("message")}
+
+    test_app = FastAPI()
+    with patch("app.app_utils.reasoning_engine_adapter.AdkApp", _FakeAdkApp):
+        attach_reasoning_engine_routes(test_app)
+        client = TestClient(test_app)
+
+        r1 = client.post(
+            "/api/stream_reasoning_engine",
+            json={"class_method": "stream_query", "input": {"message": "hello"}},
+        )
+        assert r1.status_code == 200
+        assert '"async_chunk"' in r1.text
+
+        r2 = client.post(
+            "/api/stream_reasoning_engine",
+            json={"class_method": "sync_only_stream", "input": {"message": "sync"}},
+        )
+        assert r2.status_code == 200
+        assert '"sync_chunk"' in r2.text
+

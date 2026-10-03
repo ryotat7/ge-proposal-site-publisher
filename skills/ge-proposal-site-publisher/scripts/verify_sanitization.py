@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -55,6 +56,10 @@ FORBIDDEN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         "Internal Workstation Path",
         re.compile(r"/usr/local" + r"/google|/google/src" + r"/files"),
     ),
+    (
+        "Internal Shortlink (go/b/cl)",
+        re.compile(r"(?<![a-zA-Z0-9_.-])(?:go/[a-zA-Z0-9_-]{3,}|b/\d{5,}|cl/\d{5,})\b"),
+    ),
 ]
 
 SKIP_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
@@ -77,12 +82,28 @@ def scan_directory(root: Path) -> list[str]:
                 findings.append(
                     f"{path.relative_to(root)}:{line_no}: [{label}] matched '{match.group(0)}'"
                 )
+
+    if (root / ".git").exists():
+        try:
+            git_out = subprocess.run(
+                ["git", "-C", str(root), "log", "--all", "-p"],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout
+            for label, pattern in FORBIDDEN_PATTERNS:
+                for match in pattern.finditer(git_out):
+                    findings.append(
+                        f"git-history: [{label}] matched '{match.group(0)}'"
+                    )
+        except Exception:
+            pass
     return findings
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Verify that a directory tree contains zero customer names or internal identifiers."
+        description="Verify that a directory tree and git history contain zero customer names or internal identifiers."
     )
     parser.add_argument("target_dir", type=Path, help="Root directory to audit")
     args = parser.parse_args()
@@ -95,7 +116,7 @@ def main() -> int:
         return 1
 
     print(
-        f"[OK] Sanitization audit passed with 0 findings across {args.target_dir.resolve()}."
+        f"[OK] Sanitization audit passed with 0 findings across working tree and git history in {args.target_dir.resolve()}."
     )
     return 0
 

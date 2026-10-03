@@ -53,18 +53,127 @@ All interactive HTML5 client proposals follow our 6-slide narrative structure:
 }
 
 
+STRUCTURED_RECORDS: list[dict[str, str]] = [
+    {
+        "id": "case-retail-cdp-ai-001",
+        "title": "Acme Retail Holdings: Next-Gen OMO AI Concierge & Unified CDP Proposal",
+        "client_name": "Acme Retail Holdings",
+        "industry": "Retail & E-Commerce",
+        "summary": (
+            "Unifies mobile app, e-commerce, and physical POS data into a real-time BigQuery CDP. "
+            "Deploys a conversational Gemini 2.5 Flash agent on Vertex AI Agent Runtime for hyper-personalized "
+            "styling recommendations and automated marketing campaign execution."
+        ),
+        "key_metrics": "Repeat purchase CVR +28%, Omnichannel member LTV +22%, Campaign production effort -65%",
+        "recommended_architecture": (
+            "Layer 1: Omnichannel Touchpoints (Mobile App / LINE / Web) -> "
+            "Layer 2: Auth & Delivery Gateway (Cloud Run / Firebase Hosting) -> "
+            "Layer 3: AI Agent Runtime (Vertex AI Agent Runtime / Gemini Enterprise / Vertex AI Search) -> "
+            "Layer 4: Unified Data Platform (BigQuery CDP / Private Cloud Storage / Firestore)"
+        ),
+    },
+    {
+        "id": "case-fintech-advisor-002",
+        "title": "Global Financial Corp: Wealth Management AI Concierge & Knowledge Grounding",
+        "client_name": "Global Financial Corp",
+        "industry": "Financial Services",
+        "summary": (
+            "Integrates product prospectuses, market research, and CRM history via Vertex AI Search "
+            "to power an interactive client proposal concierge with strict IAM and audit logging."
+        ),
+        "key_metrics": "Digital inquiry self-resolution +34%, Proposal preparation time -65%, Advisor NPS +19pt",
+        "recommended_architecture": (
+            "Layer 1: Advisor & Client Portal -> "
+            "Layer 2: Cloud Run Zero-Trust Auth Gateway -> "
+            "Layer 3: ADK Concierge Agent + Vertex AI Search -> "
+            "Layer 4: BigQuery Customer 360 + Firestore Audit Trail"
+        ),
+    },
+]
+
+
 def seed_knowledge_files() -> None:
     project_id = os.environ.get("PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT")
     if not project_id:
-        print("Skipping GCS seed: PROJECT_ID not set.")
+        print("Skipping seed: PROJECT_ID not set.")
         return
     bucket_name = os.environ.get("PROPOSAL_GCS_BUCKET", f"{project_id}-proposals")
+    datastore_id = os.environ.get(
+        "VERTEX_SEARCH_DATASTORE_ID", "proposal-knowledge-datastore"
+    )
+    location = os.environ.get("VERTEX_SEARCH_LOCATION", "global")
+
     client = storage.Client(project=project_id)
     bucket = client.bucket(bucket_name)
     for blob_path, content in SYNTHETIC_DOCS.items():
         blob = bucket.blob(blob_path)
-        blob.upload_from_string(content.encode("utf-8"), content_type="text/markdown; charset=utf-8")
+        blob.upload_from_string(
+            content.encode("utf-8"), content_type="text/markdown; charset=utf-8"
+        )
         print(f"Uploaded gs://{bucket_name}/{blob_path}")
+
+    try:
+        from google.api_core import exceptions
+        from google.api_core.client_options import ClientOptions
+        from google.cloud import discoveryengine_v1 as discoveryengine
+        from google.protobuf import struct_pb2
+
+        api_endpoint = (
+            f"{location}-discoveryengine.googleapis.com"
+            if location != "global"
+            else "discoveryengine.googleapis.com"
+        )
+        client_options = ClientOptions(
+            api_endpoint=api_endpoint, quota_project_id=project_id
+        )
+        ds_client = discoveryengine.DataStoreServiceClient(
+            client_options=client_options
+        )
+        collection_parent = f"projects/{project_id}/locations/{location}/collections/default_collection"
+        datastore_name = f"{collection_parent}/dataStores/{datastore_id}"
+
+        try:
+            ds_client.get_data_store(name=datastore_name)
+            print(f"Vertex AI Search DataStore already exists: {datastore_name}")
+        except exceptions.NotFound:
+            print(f"Creating Vertex AI Search DataStore: {datastore_name}...")
+            ds = discoveryengine.DataStore(
+                display_name="Proposal Knowledge DataStore",
+                industry_vertical=discoveryengine.IndustryVertical.GENERIC,
+                solution_types=[discoveryengine.SolutionType.SOLUTION_TYPE_SEARCH],
+                content_config=discoveryengine.DataStore.ContentConfig.NO_CONTENT,
+            )
+            op = ds_client.create_data_store(
+                parent=collection_parent,
+                data_store=ds,
+                data_store_id=datastore_id,
+            )
+            op.result(timeout=180)
+            print(f"Created DataStore: {datastore_name}")
+
+        doc_client = discoveryengine.DocumentServiceClient(
+            client_options=client_options
+        )
+        branch_parent = f"{datastore_name}/branches/default_branch"
+        for record in STRUCTURED_RECORDS:
+            doc_id = record["id"]
+            struct_data = struct_pb2.Struct()
+            struct_data.update(record)
+            doc = discoveryengine.Document(
+                id=doc_id,
+                name=f"{branch_parent}/documents/{doc_id}",
+                struct_data=struct_data,
+            )
+            try:
+                doc_client.update_document(
+                    document=doc,
+                    allow_missing=True,
+                )
+                print(f"Seeded Vertex AI Search document: {doc_id}")
+            except Exception as doc_exc:
+                print(f"Warning: could not seed document {doc_id}: {doc_exc}")
+    except Exception as exc:
+        print(f"Warning: Vertex AI Search datastore seeding skipped: {exc}")
 
 
 if __name__ == "__main__":

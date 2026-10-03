@@ -137,7 +137,7 @@ uv run --project proposal_agent python tests/run_live_e2e_verification.py
    - 過去のRFPや導入事例を `search_internal_knowledge` で検索し、6枚構成のアウトライン案を提示して合意形成してからWebサイトを発行します（即時生成を求められた場合はワンショット発行にも対応）。
 2. **`interactive-slide-designer` スキルによる高品質6枚構成HTML5デッキ**:
    - 全6スライドがそれぞれ異なる専用レイアウト（`hero-cover` / `bento-executive-summary` / `as-is-to-be-comparison` / `architecture-flow` / `roadmap-timeline` / `roi-and-next-steps`）と5種類のカラーテーマ（`sky` / `emerald` / `violet` / `amber` / `rose`）を備え、キーボード（`←` / `→` / `F`）・スワイプ・印刷出力に対応します。
-   - Claude Managed Agents API（`antigravity-preview-05-2026`）および Vertex AI Gemini 2.5 の両方に対応しています。
+   - Google Cloud / Vertex AI Managed Agents API（`antigravity-preview-05-2026`、`locations/global` の Interactions API）および Vertex AI Gemini 2.5 の両方に対応しています。
 3. **非公開Cloud Storage + Cloud Run認証ゲートウェイによるセキュア限定公開**:
    - 生成されたHTMLはパブリックアクセスを完全遮断（`publicAccessPrevention: enforced`）した非公開GCSバケットに保存され、案件ごとに自動発行される閲覧ID・パスワード（PBKDF2-HMAC-SHA256 12万回ストレッチング）を知るクライアントのみがCloud Run経由で閲覧できます。
 4. **発行後のフルライフサイクル管理（7つの専用ツール）**:

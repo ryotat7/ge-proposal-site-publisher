@@ -63,6 +63,13 @@ def attach_reasoning_engine_routes(app: FastAPI) -> None:
                 status_code=404,
                 detail=f"Unsupported reasoning_engine method: {class_method!r}",
             )
+        async_alias = f"async_{class_method}"
+        if (
+            not class_method.startswith("async_")
+            and async_alias in allowed
+            and hasattr(rt, async_alias)
+        ):
+            return getattr(rt, async_alias)
         return getattr(rt, class_method)
 
     @app.post("/api/stream_reasoning_engine")
@@ -71,8 +78,13 @@ def attach_reasoning_engine_routes(app: FastAPI) -> None:
         method = resolve_method(body["class_method"], streaming=True)
 
         async def generator():
-            async for event in method(**(body.get("input") or {})):
-                yield json.dumps(event) + "\n"
+            stream_obj = method(**(body.get("input") or {}))
+            if inspect.isasyncgen(stream_obj):
+                async for event in stream_obj:
+                    yield json.dumps(event) + "\n"
+            else:
+                for event in stream_obj:
+                    yield json.dumps(event) + "\n"
 
         return responses.StreamingResponse(
             content=generator(), media_type="application/json"
