@@ -145,6 +145,14 @@ STRUCTURED_RECORDS: list[dict[str, str]] = [
 ]
 
 
+def _normalize_datastore_id(token: str) -> str:
+    """Extracts the bare DataStore ID if a full projects/.../dataStores/<id> resource name was provided."""
+    cleaned = token.strip().strip("/")
+    if "/dataStores/" in cleaned:
+        cleaned = cleaned.split("/dataStores/", 1)[1].split("/", 1)[0].strip()
+    return cleaned
+
+
 def parse_datastore_ids(raw: str | None = None) -> list[str]:
     """Splits comma/colon/semicolon-separated DataStore IDs while preserving order."""
     value = (
@@ -158,7 +166,7 @@ def parse_datastore_ids(raw: str | None = None) -> list[str]:
     )
     ids: list[str] = []
     for token in re.split(r"[,:;|\s]+", value):
-        cleaned = token.strip()
+        cleaned = _normalize_datastore_id(token)
         if cleaned and cleaned not in ids:
             ids.append(cleaned)
     return ids or ["proposal-knowledge-datastore"]
@@ -493,12 +501,22 @@ def seed_knowledge_files(bind_only: bool = False) -> dict[str, Any]:
                 except Exception as doc_exc:
                     print(f"Warning: could not seed document {doc_id} in {ds_id}: {doc_exc}")
             summary["synthetic_seeded"].append(ds_id)
+        bindable_ids = [
+            d
+            for d in datastore_ids
+            if d in (
+                *summary["existing_preserved"],
+                *summary["synthetic_seeded"],
+                *summary["real_imported"],
+            )
+        ]
     except Exception as exc:
         print(f"Warning: Agent Search datastore configuration skipped: {exc}")
+        bindable_ids = datastore_ids
 
-    if ge_app_id:
+    if ge_app_id and bindable_ids:
         summary["engine_bound"] = bind_datastores_to_engine(
-            project_id, location, datastore_ids, ge_app_id
+            project_id, location, bindable_ids, ge_app_id
         )
     return summary
 

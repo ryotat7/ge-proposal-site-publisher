@@ -248,7 +248,7 @@ if [[ "${SKIP_AGENT}" != "1" ]]; then
   # existing registration in place, PATCH the Discovery Engine agent resource (see SKILL.md, gotcha 10).
   if [[ -n "${GE_APP_ID:-}" ]]; then
     if [[ "${GE_APP_ID}" != projects/* ]]; then
-      GE_APP_ID="projects/${PROJECT_NUMBER}/locations/global/collections/default_collection/engines/${GE_APP_ID}"
+      GE_APP_ID="projects/${PROJECT_NUMBER}/locations/${AGENT_SEARCH_LOCATION}/collections/default_collection/engines/${GE_APP_ID}"
     fi
     echo "==> Publishing agent to Gemini Enterprise (App: ${GE_APP_ID})..."
     agents-cli publish gemini-enterprise \
