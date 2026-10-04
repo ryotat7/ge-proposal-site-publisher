@@ -17,6 +17,13 @@ REGION="${REGION:-us-central1}"
 PROPOSAL_GCS_BUCKET="${PROPOSAL_GCS_BUCKET:-${PROJECT_ID}-proposals}"
 PROPOSAL_FIRESTORE_COLLECTION="${PROPOSAL_FIRESTORE_COLLECTION:-presentations}"
 AGENT_SEARCH_DATASTORE_ID="${AGENT_SEARCH_DATASTORE_ID:-proposal-knowledge-datastore}"
+AGENT_SEARCH_LOCATION="${AGENT_SEARCH_LOCATION:-global}"
+# Colon-joined form for gcloud --set-env-vars and agents-cli --update-env-vars (which split on commas);
+# proposal_agent/app/agent.py and infra/seed_datastore.py accept both ',' and ':' as DataStore ID delimiters.
+AGENT_SEARCH_DATASTORE_ENV="${AGENT_SEARCH_DATASTORE_ID//,/:}"
+SEED_MODE="${SEED_MODE:-auto}"
+KNOWLEDGE_GCS_URI="${KNOWLEDGE_GCS_URI:-}"
+KNOWLEDGE_BQ_TABLE="${KNOWLEDGE_BQ_TABLE:-}"
 GATEWAY_SERVICE_NAME="${GATEWAY_SERVICE_NAME:-proposal-hosting-gateway}"
 RENDERER_SERVICE_NAME="${RENDERER_SERVICE_NAME:-proposal-deck-renderer}"
 GENERATION_JOB_ID="${GENERATION_JOB_ID:-proposal-deck-generator}"
@@ -45,6 +52,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')"
 COMPUTE_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 RE_SA="service-${PROJECT_NUMBER}@gcp-sa-aiplatform-re.iam.gserviceaccount.com"
+DISCOVERY_SA="service-${PROJECT_NUMBER}@gcp-sa-discoveryengine.iam.gserviceaccount.com"
 GENERATION_JOB_NAME="projects/${PROJECT_ID}/locations/${REGION}/jobs/${GENERATION_JOB_ID}"
 
 # The deck contract (sanitiser / validator / CSP) and the deck runtime live in proposal_agent/app (single
@@ -105,6 +113,18 @@ if [[ "${SKIP_INFRA}" != "1" ]]; then
     --role="roles/iam.serviceAccountUser" \
     --project="${PROJECT_ID}" --quiet >/dev/null 2>&1 || true
 
+  # Ensure Discovery Engine Service Agent has required permissions for 1st Party DataConnectors and imports.
+  gcloud beta services identity create \
+    --service=discoveryengine.googleapis.com \
+    --project="${PROJECT_ID}" --quiet >/dev/null 2>&1 || true
+  for role in roles/storage.objectViewer roles/bigquery.dataViewer roles/bigquery.jobUser roles/discoveryengine.viewer; do
+    gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+      --member="serviceAccount:${DISCOVERY_SA}" \
+      --role="${role}" \
+      --condition=None \
+      --quiet >/dev/null 2>&1 || true
+  done
+
   echo "==> [3/8] Ensuring Firestore Native database exists..."
   if ! gcloud firestore databases describe --database="(default)" --project="${PROJECT_ID}" >/dev/null 2>&1; then
     gcloud firestore databases create \
@@ -116,11 +136,23 @@ if [[ "${SKIP_INFRA}" != "1" ]]; then
 fi
 
 if [[ "${SKIP_SEED}" != "1" ]]; then
-  echo "==> [4/8] Seeding sample knowledge documents into Agent Search datastore (${AGENT_SEARCH_DATASTORE_ID})..."
+  echo "==> [4/8] Configuring Agent Search datastore(s) (${AGENT_SEARCH_DATASTORE_ID}, SEED_MODE=${SEED_MODE})..."
   PROJECT_ID="${PROJECT_ID}" \
   PROPOSAL_GCS_BUCKET="${PROPOSAL_GCS_BUCKET}" \
   AGENT_SEARCH_DATASTORE_ID="${AGENT_SEARCH_DATASTORE_ID}" \
+  AGENT_SEARCH_LOCATION="${AGENT_SEARCH_LOCATION}" \
+  SEED_MODE="${SEED_MODE}" \
+  KNOWLEDGE_GCS_URI="${KNOWLEDGE_GCS_URI}" \
+  KNOWLEDGE_BQ_TABLE="${KNOWLEDGE_BQ_TABLE}" \
+  GE_APP_ID="${GE_APP_ID:-}" \
   python3 "${SCRIPT_DIR}/seed_datastore.py"
+elif [[ -n "${GE_APP_ID:-}" ]]; then
+  echo "==> [4/8] SKIP_SEED=1: Binding existing DataStore(s) (${AGENT_SEARCH_DATASTORE_ID}) to Gemini Enterprise Engine (${GE_APP_ID})..."
+  PROJECT_ID="${PROJECT_ID}" \
+  AGENT_SEARCH_DATASTORE_ID="${AGENT_SEARCH_DATASTORE_ID}" \
+  AGENT_SEARCH_LOCATION="${AGENT_SEARCH_LOCATION}" \
+  GE_APP_ID="${GE_APP_ID}" \
+  python3 "${SCRIPT_DIR}/seed_datastore.py" --bind-only
 fi
 
 if [[ "${SKIP_GATEWAY}" != "1" ]]; then
@@ -196,7 +228,7 @@ if [[ "${SKIP_JOB}" != "1" ]]; then
     --cpu=1 \
     --memory=2Gi \
     --service-account="${COMPUTE_SA}" \
-    --set-env-vars="PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},GENAI_LOCATION=global,GEMINI_MODEL=${GEMINI_MODEL},PROPOSAL_GCS_BUCKET=${PROPOSAL_GCS_BUCKET},PROPOSAL_FIRESTORE_COLLECTION=${PROPOSAL_FIRESTORE_COLLECTION},AGENT_SEARCH_DATASTORE_ID=${AGENT_SEARCH_DATASTORE_ID},AGENT_SEARCH_LOCATION=global,HOSTING_BASE_URL=${HOSTING_BASE_URL},PROPOSAL_BRAND_NAME=${PROPOSAL_BRAND_NAME},PROPOSAL_BRAND_BADGE=${PROPOSAL_BRAND_BADGE},FREEFORM_DESIGN_ENABLED=${FREEFORM_DESIGN_ENABLED},FREEFORM_ADK_MODEL=${FREEFORM_ADK_MODEL},DECK_RENDERER_URL=${DECK_RENDERER_URL},IMAGE_MODEL=${IMAGE_MODEL},FREEFORM_TOTAL_BUDGET_SECONDS=${FREEFORM_TOTAL_BUDGET_SECONDS},FREEFORM_REVIEW_ROUNDS=${FREEFORM_REVIEW_ROUNDS}" \
+    --set-env-vars="PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},GENAI_LOCATION=global,GEMINI_MODEL=${GEMINI_MODEL},PROPOSAL_GCS_BUCKET=${PROPOSAL_GCS_BUCKET},PROPOSAL_FIRESTORE_COLLECTION=${PROPOSAL_FIRESTORE_COLLECTION},AGENT_SEARCH_DATASTORE_ID=${AGENT_SEARCH_DATASTORE_ENV},AGENT_SEARCH_LOCATION=${AGENT_SEARCH_LOCATION},HOSTING_BASE_URL=${HOSTING_BASE_URL},PROPOSAL_BRAND_NAME=${PROPOSAL_BRAND_NAME},PROPOSAL_BRAND_BADGE=${PROPOSAL_BRAND_BADGE},FREEFORM_DESIGN_ENABLED=${FREEFORM_DESIGN_ENABLED},FREEFORM_ADK_MODEL=${FREEFORM_ADK_MODEL},DECK_RENDERER_URL=${DECK_RENDERER_URL},IMAGE_MODEL=${IMAGE_MODEL},FREEFORM_TOTAL_BUDGET_SECONDS=${FREEFORM_TOTAL_BUDGET_SECONDS},FREEFORM_REVIEW_ROUNDS=${FREEFORM_REVIEW_ROUNDS}" \
     --quiet
   echo "    Generation job: ${GENERATION_JOB_NAME}"
 fi
@@ -208,7 +240,7 @@ if [[ "${SKIP_AGENT}" != "1" ]]; then
     --project="${PROJECT_ID}" \
     --region="${REGION}" \
     --no-confirm-project \
-    --update-env-vars="PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},GENAI_LOCATION=global,GEMINI_MODEL=${GEMINI_MODEL},PROPOSAL_GCS_BUCKET=${PROPOSAL_GCS_BUCKET},PROPOSAL_FIRESTORE_COLLECTION=${PROPOSAL_FIRESTORE_COLLECTION},HOSTING_BASE_URL=${HOSTING_BASE_URL},AGENT_SEARCH_DATASTORE_ID=${AGENT_SEARCH_DATASTORE_ID},AGENT_SEARCH_LOCATION=global,PROPOSAL_BRAND_NAME=${PROPOSAL_BRAND_NAME},PROPOSAL_BRAND_BADGE=${PROPOSAL_BRAND_BADGE},GENERATION_JOB_NAME=${GENERATION_JOB_NAME},GENERATION_TRIGGER_MODE=auto,FREEFORM_DESIGN_ENABLED=${FREEFORM_DESIGN_ENABLED}"
+    --update-env-vars="PROJECT_ID=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},GENAI_LOCATION=global,GEMINI_MODEL=${GEMINI_MODEL},PROPOSAL_GCS_BUCKET=${PROPOSAL_GCS_BUCKET},PROPOSAL_FIRESTORE_COLLECTION=${PROPOSAL_FIRESTORE_COLLECTION},HOSTING_BASE_URL=${HOSTING_BASE_URL},AGENT_SEARCH_DATASTORE_ID=${AGENT_SEARCH_DATASTORE_ENV},AGENT_SEARCH_LOCATION=${AGENT_SEARCH_LOCATION},PROPOSAL_BRAND_NAME=${PROPOSAL_BRAND_NAME},PROPOSAL_BRAND_BADGE=${PROPOSAL_BRAND_BADGE},GENERATION_JOB_NAME=${GENERATION_JOB_NAME},GENERATION_TRIGGER_MODE=auto,FREEFORM_DESIGN_ENABLED=${FREEFORM_DESIGN_ENABLED}"
 
   # GE_APP_ID must be the FULL engine resource name (agents-cli >= 1.4.0):
   #   projects/<project-number>/locations/global/collections/default_collection/engines/<engine-id>

@@ -83,7 +83,13 @@ python3 skills/interactive-slide-designer/scripts/validate_slide_deck.py --help
 python3 skills/ge-proposal-site-publisher/scripts/verify_sanitization.py .
 ```
 
-### Step 2: Provision infrastructure and deploy all workloads
+### Step 2: Provision infrastructure and deploy all workloads (Sandbox or Production Real Data)
+
+`infra/deploy.sh` and `infra/seed_datastore.py` support **two deployment workflows**:
+
+#### Workflow A — Sandbox / Quickstart Evaluation (Auto-Seeded Sample RFP + CRM Knowledge)
+
+Creates `proposal-knowledge-datastore` (if it does not exist yet) and seeds realistic generic sample records covering both **Google Drive past RFPs / case studies** (`source_system="google_drive"`) and **Salesforce CRM opportunity history** (`source_system="salesforce"`):
 
 ```bash
 export PROJECT_ID="your-gcp-project-id"
@@ -97,10 +103,34 @@ export GE_APP_ID="projects/<project-number>/locations/global/collections/default
 bash infra/deploy.sh
 ```
 
+#### Workflow B — Production Deployment with Real Data Sources (Google Drive, Salesforce, Cloud Storage, BigQuery)
+
+When connecting real enterprise data sources — such as a **Google Drive 1st Party DataConnector DataStore** (past RFPs, proposals, case studies) and a **Salesforce 1st Party DataConnector DataStore** (live `Account` / `Opportunity` / `Task` context) — pass comma-separated DataStore IDs in `AGENT_SEARCH_DATASTORE_ID` and set `SEED_MODE=real` (or `SKIP_SEED=1`):
+
+```bash
+export PROJECT_ID="your-gcp-project-id"
+export REGION="us-central1"
+# Comma-separated 1st Party DataConnector DataStore IDs (e.g., Google Drive + Salesforce):
+export AGENT_SEARCH_DATASTORE_ID="your-drive-rfp-datastore-id,your-salesforce-crm-datastore-id"
+export SEED_MODE="real"   # Never seeds synthetic data; preserves existing 1P connector DataStores
+# Optional: if creating a new custom DataStore from real Cloud Storage PDFs/docs or a BigQuery table:
+# export KNOWLEDGE_GCS_URI="gs://your-rfp-bucket/proposals/*.pdf"
+# export KNOWLEDGE_BQ_TABLE="your-project.your_dataset.crm_opportunities"
+export PROPOSAL_BRAND_NAME="Your Company Name"
+export PROPOSAL_BRAND_BADGE="YC"
+export GE_APP_ID="projects/<project-number>/locations/global/collections/default_collection/engines/<engine-id>"
+
+bash infra/deploy.sh
+```
+
+- **Zero synthetic pollution in production**: in `SEED_MODE=auto` (default) or `SEED_MODE=real`, any DataStore that already exists in Discovery Engine is preserved as-is without uploading or inserting synthetic records. Even when `SKIP_SEED=1` is set, if `GE_APP_ID` is provided, `deploy.sh` runs `seed_datastore.py --bind-only` so the specified DataStores are automatically bound (`PATCH updateMask=dataStoreIds`) to the Gemini Enterprise Engine.
+- **Multi-datastore federated search**: `search_internal_knowledge` queries every DataStore in `AGENT_SEARCH_DATASTORE_ID`, extracts both structured CRM fields (`Name`, `AccountName`, `StageName`, `NextStep`, `Description`, `Amount`) and unstructured document snippets/extractive segments (`derived_struct_data` from Google Drive / PDFs), and tags each result with `datastore_id`, `source_type` (`google_drive`, `salesforce`, or `knowledge`), and `source_uri`.
+- **Comma-safe env propagation**: `deploy.sh` converts commas in `AGENT_SEARCH_DATASTORE_ID` to `:` (`AGENT_SEARCH_DATASTORE_ENV`) when passing `--set-env-vars` / `--update-env-vars` to `gcloud` and `agents-cli`, and `agent.py` splits on both `,` and `:`.
+
 | Phase | What `infra/deploy.sh` does | Skip flag |
 |---|---|---|
-| 1–3 | Enables APIs; creates the private bucket (uniform access, public access prevention) and grants IAM; ensures the Firestore Native database | `SKIP_INFRA=1` |
-| 4 | Seeds synthetic RFP / case-study documents into Agent Search | `SKIP_SEED=1` |
+| 1–3 | Enables APIs; creates the private bucket (uniform access, public access prevention) and grants IAM (including Discovery Engine Service Agent `roles/storage.objectViewer`, `roles/bigquery.dataViewer`, `roles/bigquery.jobUser`, `roles/discoveryengine.viewer`); ensures the Firestore Native database | `SKIP_INFRA=1` |
+| 4 | Configures Agent Search DataStore(s) (`SEED_MODE=auto\|real\|synthetic\|none`, optional `KNOWLEDGE_GCS_URI` / `KNOWLEDGE_BQ_TABLE` import) and binds DataStore(s) to the Gemini Enterprise Engine (`GE_APP_ID`) | `SKIP_SEED=1` (`--bind-only` still runs if `GE_APP_ID` is set) |
 | 5 | Copies the deck contract/runtime and deploys the hosting gateway (`proposal-hosting-gateway`, public, app-level auth) | `SKIP_GATEWAY=1` |
 | 6 | Copies the deck contract/runtime and deploys the deck renderer (`proposal-deck-renderer`, `--no-allow-unauthenticated`, `ALLOWED_BUCKETS=<bucket>`), then grants `roles/run.invoker` to the job's service account | `SKIP_RENDERER=1` (also skipped when `FREEFORM_DESIGN_ENABLED!=true`) |
 | 7 | Deploys the generation job (`proposal-deck-generator`, 2 GiB, `--task-timeout=1500s`) with `FREEFORM_DESIGN_ENABLED`, `FREEFORM_ADK_MODEL`, `DECK_RENDERER_URL`, `IMAGE_MODEL`, `FREEFORM_TOTAL_BUDGET_SECONDS`, `FREEFORM_REVIEW_ROUNDS` | `SKIP_JOB=1` |
@@ -133,3 +163,20 @@ This verifies:
 - A proposal website is generated, stored in private Cloud Storage (direct public GCS URLs return `HTTP 403`), and served through the gateway (`401` unauthenticated, `200` with Basic auth or the signed session cookie, access logs written to Firestore).
 - Editing (`edit_proposal_website`), credential rotation (`manage_proposal_credentials`) and revocation (`delete_proposal_website` → `HTTP 403`) work end to end.
 - `run_remote_multiturn_e2e.py` asserts that turn 2 ends with an answer containing the share URL, viewer ID and password, that the job reaches `generation_status=ready` with `generation_engine` recorded (e.g. `adk_freeform:gemini-3.8-flash`), and that the finished deck is served through the same authenticated URL.
+
+## 4. Ready-to-Paste Antigravity Prompts
+
+Combine Google's official public skill suites (`npx skills add google/skills` and `npx skills add google/agents-cli`) with this repository to automate infrastructure provisioning, Gemini Enterprise DataStore binding, agent deployment, and live E2E verification from a single prompt:
+
+- **Prompt 1 (Sandbox Quickstart — Auto-Seeded Sample Drive RFP + Salesforce CRM Data)**:
+  ```text
+  Clone https://github.com/ryotat7/ge-proposal-site-publisher and follow skills/ge-proposal-site-publisher/SKILL.md to provision all required Google Cloud resources, seed the sample RFP & CRM knowledge DataStore, deploy the Cloud Run services/job and Agent Runtime agent in project "<YOUR_PROJECT_ID>", register the agent with Gemini Enterprise (engine ID: "<YOUR_GE_ENGINE_ID>"), and run the live E2E verification suite.
+  ```
+- **Prompt 2 (Production Deployment — Real Google Drive + Salesforce DataStores, Engine Binding & Brand Customization)**:
+  ```text
+  Using the google/skills and google/agents-cli skills together with https://github.com/ryotat7/ge-proposal-site-publisher (skills/ge-proposal-site-publisher/SKILL.md), configure and deploy a production Proposal Website Publisher in Google Cloud project "<YOUR_PROJECT_ID>" connected to Gemini Enterprise engine "<YOUR_GE_ENGINE_ID>":
+  1. Enable required APIs and grant least-privilege IAM to the Discovery Engine Service Agent, Agent Runtime Service Agent, and Cloud Run Service Account.
+  2. Connect our production Google Drive DataStore ("<YOUR_DRIVE_DATASTORE_ID>", past RFPs & case studies) and Salesforce DataStore ("<YOUR_SALESFORCE_DATASTORE_ID>", live CRM opportunity context) with AGENT_SEARCH_DATASTORE_ID="<YOUR_DRIVE_DATASTORE_ID>,<YOUR_SALESFORCE_DATASTORE_ID>" and SEED_MODE=real (no synthetic seed data), and bind both DataStores to the Gemini Enterprise engine.
+  3. Set PROPOSAL_BRAND_NAME="<YOUR_COMPANY_NAME>" and apply our brand/CSS tokens in skills/freeform-deck-designer/SKILL.md.
+  4. Deploy the Cloud Run hosting gateway, private deck renderer, background generation job, and Agent Runtime concierge, publish to Gemini Enterprise, and run E2E self-verification.
+  ```

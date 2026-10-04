@@ -132,12 +132,23 @@ python3 skills/ge-proposal-site-publisher/scripts/verify_sanitization.py .
 ```bash
 export PROJECT_ID="your-gcp-project-id"
 export REGION="us-central1"
-# Optional (first deployment only): register with an existing Gemini Enterprise app.
+# Optional: register with an existing Gemini Enterprise app and bind DataStores to its Engine.
 # Full engine resource name required by agents-cli >= 1.4.0 (a bare engine id is expanded automatically):
 # export GE_APP_ID="projects/<project-number>/locations/global/collections/default_collection/engines/<engine-id>"
 
+# Option A: Sandbox / evaluation deployment (auto-seeds synthetic Google Drive RFP + Salesforce CRM DataStore)
 bash infra/deploy.sh
-# Phases: APIs → bucket + IAM → Firestore → Agent Search seed → Cloud Run gateway
+
+# Option B: Production deployment with real 1st Party DataConnector DataStores (Google Drive + Salesforce)
+# Preserves existing DataStores without synthetic data pollution and binds both stores to GE_APP_ID:
+# SEED_MODE=real \
+# AGENT_SEARCH_DATASTORE_ID="drive-past-rfps-ds,salesforce-crm-ds" \
+# GE_APP_ID="projects/<project-number>/locations/global/collections/default_collection/engines/<engine-id>" \
+# PROPOSAL_BRAND_NAME="Your Company Proposal Portal" \
+# PROPOSAL_BRAND_BADGE="EXECUTIVE PROPOSAL" \
+# bash infra/deploy.sh
+
+# Phases: APIs → bucket + IAM → Firestore → Agent Search seed / Engine binding → Cloud Run gateway
 #         → Cloud Run deck renderer → Cloud Run job (proposal-deck-generator) → Agent Runtime (+ Gemini Enterprise)
 # Re-deploy only the agent:  SKIP_INFRA=1 SKIP_SEED=1 SKIP_GATEWAY=1 SKIP_RENDERER=1 SKIP_JOB=1 bash infra/deploy.sh
 # Template-only deployment (no renderer, no free design):  FREEFORM_DESIGN_ENABLED=false bash infra/deploy.sh
@@ -208,7 +219,7 @@ proposal_agent/.venv/bin/python tests/run_remote_multiturn_e2e.py
 
 | ツール | 内容 |
 |---|---|
-| `search_internal_knowledge` | 社内ナレッジ・過去提案事例の検索 |
+| `search_internal_knowledge` | 社内ナレッジ・過去提案事例・CRM 商談情報の横断検索（カンマ区切りまたはコロン区切りで複数の Agent Search DataStore を同時検索可能） |
 | `create_proposal_website` | 限定公開 URL・閲覧用 ID・パスワードの即時発行とバックグラウンド生成の開始 |
 | `get_proposal_status` | 生成・修正のフェーズ、使用エンジン、経過時間、完成の目安の確認 |
 | `edit_proposal_website` | 公開済みデッキの修正、デザインの切り替え、取り消し（`undo_last_edit`）、テンプレート版から自由デザイン版への作り直し（`convert_to_freeform`） |
@@ -222,12 +233,23 @@ proposal_agent/.venv/bin/python tests/run_remote_multiturn_e2e.py
 ```bash
 export PROJECT_ID="your-gcp-project-id"
 export REGION="us-central1"
-# 初回のみ: 既存の Gemini Enterprise アプリに登録する場合（エンジンの完全なリソース名）
+# 既存の Gemini Enterprise アプリに登録し、DataStore を Engine にバインドする場合（エンジンの完全なリソース名）
 # export GE_APP_ID="projects/<project-number>/locations/global/collections/default_collection/engines/<engine-id>"
+
+# ① サンドボックス検証（モックの Google Drive 過去提案書・事例 + Salesforce 商談データを自動投入）
 bash infra/deploy.sh
+
+# ② 本番データ連携（Google Drive 1st Party DataConnector + Salesforce 1st Party DataConnector 等の実 DataStore を利用）
+# 既存の DataStore にサンプルデータを混入させず、複数 DataStore を Gemini Enterprise Engine とエージェントに紐付けます:
+# SEED_MODE=real \
+# AGENT_SEARCH_DATASTORE_ID="drive-past-rfps-ds,salesforce-crm-ds" \
+# GE_APP_ID="projects/<project-number>/locations/global/collections/default_collection/engines/<engine-id>" \
+# PROPOSAL_BRAND_NAME="Your Company Proposal Portal" \
+# PROPOSAL_BRAND_BADGE="EXECUTIVE PROPOSAL" \
+# bash infra/deploy.sh
 ```
 
-`infra/deploy.sh` は、API の有効化、非公開バケットと IAM、Firestore、Agent Search のサンプルデータ、ホスティングゲートウェイ、deck renderer、生成用 Cloud Run Job、Agent Runtime へのエージェントのデプロイ（`GE_APP_ID` を指定した場合は Gemini Enterprise への登録）を順に実行します。必要な IAM ロールと環境変数は [architecture_and_iam.md](skills/ge-proposal-site-publisher/references/architecture_and_iam.md) にまとめています。
+`infra/deploy.sh` は、API の有効化、非公開バケットと IAM（Discovery Engine Service Agent を含む）、Firestore、Agent Search DataStore の準備・Engine へのバインド、ホスティングゲートウェイ、deck renderer、生成用 Cloud Run Job、Agent Runtime へのエージェントのデプロイ（`GE_APP_ID` を指定した場合は Gemini Enterprise への登録）を順に実行します。必要な IAM ロールと環境変数は [architecture_and_iam.md](skills/ge-proposal-site-publisher/references/architecture_and_iam.md) にまとめています。
 
 ## License
 
