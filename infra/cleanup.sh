@@ -9,9 +9,23 @@ set -euo pipefail
 PROJECT_ID="${PROJECT_ID:?Please set PROJECT_ID to your Google Cloud project ID}"
 REGION="${REGION:-us-central1}"
 GATEWAY_SERVICE_NAME="${GATEWAY_SERVICE_NAME:-proposal-hosting-gateway}"
+RENDERER_SERVICE_NAME="${RENDERER_SERVICE_NAME:-proposal-deck-renderer}"
+GENERATION_JOB_ID="${GENERATION_JOB_ID:-proposal-deck-generator}"
 
 echo "==> Deleting Cloud Run service ${GATEWAY_SERVICE_NAME} in ${PROJECT_ID} (${REGION})..."
 gcloud run services delete "${GATEWAY_SERVICE_NAME}" \
+  --region="${REGION}" \
+  --project="${PROJECT_ID}" \
+  --quiet || true
+
+echo "==> Deleting Cloud Run service ${RENDERER_SERVICE_NAME} (deck renderer)..."
+gcloud run services delete "${RENDERER_SERVICE_NAME}" \
+  --region="${REGION}" \
+  --project="${PROJECT_ID}" \
+  --quiet || true
+
+echo "==> Deleting Cloud Run job ${GENERATION_JOB_ID} (background deck generation)..."
+gcloud run jobs delete "${GENERATION_JOB_ID}" \
   --region="${REGION}" \
   --project="${PROJECT_ID}" \
   --quiet || true

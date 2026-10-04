@@ -43,13 +43,100 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
-MANAGED_AGENT_MODEL = os.environ.get(
-    "MANAGED_AGENT_MODEL", "antigravity-preview-05-2026"
-)
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 SKILL_DIR = Path(__file__).resolve().parent / "skills" / "interactive-slide-designer"
 
 SUPPORTED_THEME_COLORS = {"sky", "emerald", "violet", "amber", "rose"}
+
+# Overall look of the deck (background / text colour / card material). `theme_color` is only the accent colour.
+SUPPORTED_DESIGN_STYLES = ("immersive-dark", "clean-light", "editorial-light")
+DEFAULT_DESIGN_STYLE = "immersive-dark"
+DESIGN_STYLE_LABELS = {
+    "immersive-dark": "濃紺ダーク（immersive-dark）",
+    "clean-light": "白基調クリーン（clean-light）",
+    "editorial-light": "生成り色エディトリアル（editorial-light）",
+}
+_DESIGN_STYLE_ALIASES = {
+    "editorial": "editorial-light",
+    "magazine": "editorial-light",
+    "paper": "editorial-light",
+    "serif": "editorial-light",
+    "dark": "immersive-dark",
+    "immersive": "immersive-dark",
+    "black": "immersive-dark",
+    "navy": "immersive-dark",
+    "light": "clean-light",
+    "white": "clean-light",
+    "clean": "clean-light",
+    "minimal": "clean-light",
+}
+CUSTOM_CSS_MAX_CHARS = 8000
+
+# Tokens that could load external resources, execute script, or smuggle markup out of the <style> element.
+_CSS_FORBIDDEN_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"@\s*import", "@blocked-import"),
+    (r"@\s*namespace", "@blocked-namespace"),
+    (r"@\s*charset", "@blocked-charset"),
+    (r"@\s*font-face", "@blocked-font-face"),
+    (r"url\s*\(", "blocked("),
+    (r"src\s*\(", "blocked("),
+    (r"image-set\s*\(", "blocked("),
+    (r"image\s*\(", "blocked("),
+    (r"element\s*\(", "blocked("),
+    (r"expression\s*\(", "blocked("),
+    (r"javascript\s*:", "blocked:"),
+    (r"vbscript\s*:", "blocked:"),
+    (r"-moz-binding", "blocked-binding"),
+    (r"behavior\s*:", "blocked:"),
+)
+
+
+def normalize_design_style(value: Any, default: str = DEFAULT_DESIGN_STYLE) -> str:
+    """Maps free-form style names (e.g. 'white', 'Light mode') onto a supported design style."""
+    raw = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+    if not raw:
+        return default
+    if raw in SUPPORTED_DESIGN_STYLES:
+        return raw
+    if raw in _DESIGN_STYLE_ALIASES:
+        return _DESIGN_STYLE_ALIASES[raw]
+    for key, mapped in _DESIGN_STYLE_ALIASES.items():
+        if key in raw:
+            return mapped
+    return default
+
+
+def sanitize_custom_css(css: Any, max_chars: int = CUSTOM_CSS_MAX_CHARS) -> str:
+    """Neutralises LLM-authored CSS before it is embedded verbatim inside a <style> element.
+
+    Defence in depth: removes '<' (no </style> breakout) and backslashes (no CSS escape tricks such as
+    `\75 rl(`), strips comments and control characters, disables url()/@import/expression()/javascript: and
+    similar constructs, breaks up '{{' / '}}' (reserved by the DOM validator) and caps the length.
+    """
+    if not css:
+        return ""
+    text = str(css)
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    text = text.replace("<", "").replace("\\", "")
+    text = "".join(ch for ch in text if ch in "\n\t" or ord(ch) >= 32)
+    for pattern, replacement in _CSS_FORBIDDEN_PATTERNS:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    while "{{" in text or "}}" in text:
+        text = text.replace("{{", "{ {").replace("}}", "} }")
+    text = text.strip()
+    if len(text) > max_chars:
+        cut = text.rfind("}", 0, max_chars)
+        text = text[: cut + 1] if cut > 0 else ""
+    return text
+
+
+def _normalize_deck_in_place(deck_obj: "PresentationDeckSpec") -> "PresentationDeckSpec":
+    """Coerces theme / design style / custom CSS to safe, supported values (idempotent)."""
+    if deck_obj.theme_color not in SUPPORTED_THEME_COLORS:
+        deck_obj.theme_color = "sky"
+    deck_obj.design_style = normalize_design_style(deck_obj.design_style)
+    deck_obj.custom_css = sanitize_custom_css(deck_obj.custom_css)
+    return deck_obj
 
 
 def _get_project_id() -> str:
@@ -65,15 +152,19 @@ def _get_location() -> str:
 
 
 def _get_model_name() -> str:
-    return os.environ.get("GEMINI_MODEL", MODEL)
+    return (
+        os.environ.get("PROPOSAL_AGENT_MODEL")
+        or os.environ.get("GEMINI_MODEL")
+        or MODEL
+    )
 
 
 def _get_genai_location(model_name: str | None = None) -> str:
-    explicit = os.environ.get("GENAI_LOCATION", "").strip()
-    if explicit:
-        return explicit
+    explicit_loc = os.environ.get("GENAI_LOCATION")
+    if explicit_loc:
+        return explicit_loc
     target = (model_name or _get_model_name()).lower()
-    if target.startswith("gemini-3") or target.startswith("antigravity"):
+    if target.startswith("gemini-3"):
         return "global"
     return _get_location()
 
@@ -85,7 +176,7 @@ os.environ.setdefault("GOOGLE_CLOUD_LOCATION", _get_location())
 
 def _get_bucket_name() -> str:
     return os.environ.get(
-        "PROPOSAL_GCS_BUCKET", f"{_get_project_id()}-proposal-sites"
+        "PROPOSAL_GCS_BUCKET", f"{_get_project_id()}-proposals"
     )
 
 
@@ -174,7 +265,7 @@ class ArchitectureNode(BaseModel):
 
 
 class RoadmapPhase(BaseModel):
-    phase_name: str = Field(description="フェーズ名（例：Phase 1: 基盤構築・PoC）")
+    phase_name: str = Field(description="フェーズ名（例：Phase 1: 基盤構築・実証）")
     period: str = Field(description="期間目安（例：Month 1 - 2）")
     deliverables: list[str] = Field(description="主な実施事項・成果物（3項目）")
     milestone: str = Field(description="フェーズ完了時のマイルストーン")
@@ -194,6 +285,21 @@ class PresentationDeckSpec(BaseModel):
     custom_callout: str = Field(
         default="",
         description="表紙に表示する特別ハイライトメッセージ（任意・60文字以内）",
+    )
+    design_style: str = Field(
+        default=DEFAULT_DESIGN_STYLE,
+        description=(
+            "全体のデザインスタイル（背景・文字色・カードの質感）。immersive-dark（濃紺ダーク・グロー効果）、"
+            "clean-light（白背景・濃いグレー文字・白カードと薄い影のミニマル）、"
+            "editorial-light（生成り色の背景・明朝体見出し・フラットなカード）のいずれか"
+        ),
+    )
+    custom_css: str = Field(
+        default="",
+        description=(
+            "任意の追加CSS（デザイン微調整用・通常は空文字）。各宣言に !important を付け、url()・@import・外部リソース・"
+            "山括弧・バックスラッシュは使わないこと（8000文字以内）"
+        ),
     )
     current_challenges: list[ChallengeItem] = Field(
         description="Slide 02: 現状の主要課題（必ず3項目）",
@@ -284,8 +390,7 @@ def render_deck_html(
     else:
         deck_obj = deck_spec
 
-    if deck_obj.theme_color not in SUPPORTED_THEME_COLORS:
-        deck_obj.theme_color = "sky"
+    _normalize_deck_in_place(deck_obj)
 
     if not generated_date:
         generated_date = datetime.datetime.now(
@@ -299,6 +404,8 @@ def render_deck_html(
     template = env.get_template("deck_base.html.j2")
     html_output = template.render(
         deck=deck_obj,
+        design_style=deck_obj.design_style,
+        custom_css=deck_obj.custom_css,
         generated_date=generated_date,
         brand_name=_get_brand_name(),
         brand_badge=_get_brand_badge(),
@@ -313,12 +420,12 @@ def validate_rendered_html(html_str: str) -> bool:
         raise ValueError("Missing <!DOCTYPE html> declaration.")
     if "{{" in html_str or "}}" in html_str:
         raise ValueError("Unrendered Jinja2 template expressions detected in HTML.")
-    slide_matches = re.findall(r'data-slide-index="(\d+)"', html_str)
+    slide_matches = re.findall(r'<[a-zA-Z][^<>]*?\sdata-slide-index="(\d+)"', html_str)
     if slide_matches != ["0", "1", "2", "3", "4", "5"]:
         raise ValueError(
             f"Expected 6 slides with indices 0..5, found: {slide_matches}"
         )
-    layouts = re.findall(r'data-layout="([^"]+)"', html_str)
+    layouts = re.findall(r'<[a-zA-Z][^<>]*?\sdata-layout="([^"]+)"', html_str)
     if len(set(layouts)) < 4:
         raise ValueError(
             f"Expected bespoke per-slide layouts (at least 4 distinct data-layout values), found: {layouts}"
@@ -339,7 +446,7 @@ def validate_rendered_html(html_str: str) -> bool:
 
 def _build_slide_outline(deck_obj: PresentationDeckSpec) -> list[str]:
     return [
-        f"Slide 01 [Cover / {deck_obj.theme_color}]: {deck_obj.client_name} 御中 - {deck_obj.proposal_title}",
+        f"Slide 01 [Cover / {deck_obj.theme_color} / {deck_obj.design_style}]: {deck_obj.client_name} 御中 - {deck_obj.proposal_title}",
         "Slide 02 [Executive Summary Bento]: "
         + " / ".join(c.title for c in deck_obj.current_challenges)
         + f" → {deck_obj.executive_conclusion}",
@@ -361,8 +468,8 @@ def _default_deck_spec_from_brief(
     theme_color: str = "sky",
 ) -> PresentationDeckSpec:
     """Deterministic fallback generator for PresentationDeckSpec when LLM API is mocked or offline."""
-    clean_client = re.sub(r"(御中|様)$", "", client_name.strip()).strip() or "Sample Client Inc."
-    slug = re.sub(r"[^a-z0-9-]+", "-", clean_client.lower()).strip("-") or "sample-client"
+    clean_client = re.sub(r"(御中|様)$", "", client_name.strip()).strip() or "Client"
+    slug = re.sub(r"[^a-z0-9-]+", "-", clean_client.lower()).strip("-") or "client"
     theme = theme_color if theme_color in SUPPORTED_THEME_COLORS else "sky"
     return PresentationDeckSpec(
         client_name=clean_client,
@@ -375,7 +482,7 @@ def _default_deck_spec_from_brief(
             else "店舗・EC・アプリの顧客接点をリアルタイム統合し、LTV最大化を実現するビジネス変革の羅針盤"
         ),
         theme_color=theme,
-        custom_callout="Managed Agents API & Interactive Slide Designer Skill 適用済み",
+        custom_callout="Interactive Slide Designer Skill 適用済み",
         current_challenges=[
             ChallengeItem(
                 title="チャネル間の顧客データ分断",
@@ -391,7 +498,7 @@ def _default_deck_spec_from_brief(
             ),
         ],
         executive_conclusion=(
-            f"{_get_brand_name()}のUXデザイン知見とGoogle Cloud (BigQuery + Gemini Enterprise Agent Platform + Gemini Enterprise) を融合し、"
+            f"{_get_brand_name()}のUXデザイン知見とGoogle Cloud (BigQuery + Gemini Enterprise Agent Platform) を融合し、"
             f"{clean_client}様の対話型AI体験とマーケティング自律化を最短2ヶ月で実現します。"
         )[:120],
         before_state=[
@@ -428,7 +535,7 @@ def _default_deck_spec_from_brief(
             ArchitectureNode(
                 layer_name="2. 認証・軽量配信基盤層",
                 icon="fa-shield-halved",
-                components=["Cloud Run 認証GW", "Firestore セッション管理", "非公開 Cloud Storage"],
+                components=["Cloud Run 認証GW", "非公開 Cloud Storage", "Firestore セッション管理"],
                 description="取引先・顧客向けにセキュアかつゼロ遅延なWeb配信とアクセス制御を提供。",
             ),
             ArchitectureNode(
@@ -446,14 +553,14 @@ def _default_deck_spec_from_brief(
         ],
         roadmap_phases=[
             RoadmapPhase(
-                phase_name="Phase 1: 構想設計・PoC検証",
+                phase_name="Phase 1: 構想設計・実証検証",
                 period="Month 1 - 2",
                 deliverables=[
                     "カスタマージャーニー設計と優先ユースケース定義",
                     "BigQuery・Agent Searchへの初期データ統合",
                     "AIエージェントのプロトタイプ実装と社内検証",
                 ],
-                milestone="プロトタイプ合意・PoC効果測定完了",
+                milestone="プロトタイプ合意・実証効果の測定完了",
             ),
             RoadmapPhase(
                 phase_name="Phase 2: パイロット導入・セキュリティ適用",
@@ -492,25 +599,6 @@ def _default_deck_spec_from_brief(
             "2週間後：Phase 1 詳細スコープ定義書およびお見積りのご提示",
         ],
     )
-
-
-def _managed_agents_enabled() -> bool:
-    return os.environ.get("ENABLE_MANAGED_AGENTS_API", "true").lower() in ("true", "1")
-
-
-def _get_managed_agent_deadline_seconds() -> int:
-    """Time budget for the Managed Agents API phase before falling back (default 600s = 10 min)."""
-    try:
-        return max(30, int(os.environ.get("MANAGED_AGENT_DEADLINE_SECONDS", "600")))
-    except ValueError:
-        return 600
-
-
-def _get_managed_agent_poll_interval_seconds() -> float:
-    try:
-        return max(0.0, float(os.environ.get("MANAGED_AGENT_POLL_INTERVAL_SECONDS", "8")))
-    except ValueError:
-        return 8.0
 
 
 def _get_fast_model_timeout_seconds() -> int:
@@ -558,7 +646,9 @@ def _build_synthesis_prompt(
     knowledge_context: str,
     outline_hint: str,
     skill_text: str,
+    design_style: str = DEFAULT_DESIGN_STYLE,
 ) -> str:
+    style_label = DESIGN_STYLE_LABELS.get(design_style, design_style)
     outline_block = (
         f"\n【ユーザーと合意済みの構成メモ（優先して反映）】:\n{outline_hint}\n" if outline_hint else ""
     )
@@ -570,119 +660,16 @@ def _build_synthesis_prompt(
 【提案タイトル】: {proposal_title}
 【提案ブリーフ・要望】: {proposal_brief}
 【希望テーマカラー】: {theme}
+【デザインスタイル】: {style_label}（design_style には {design_style} を設定し、custom_css は空文字にしてください）
 {outline_block}
 【社内ナレッジ検索結果】:
 {knowledge_context}
 
+【製品名の表記ルール】: Google Cloud 製品は現行の正式名称（Gemini Enterprise Agent Platform / Agent Runtime / Agent Search / Gemini 3.8 Flash / BigQuery / Cloud Run）で表記し、旧ブランド名（Gemini Enterprise Agent Platform へ改称する前の名称）や旧世代のモデル名は使わないでください。
+
 【適用スキル (interactive-slide-designer)】:
 {skill_text}
 """
-
-
-_MANAGED_AGENT_OUTPUT_CONTRACT = """
-【出力契約（厳守）】
-- 最終回答は `PresentationDeckSpec` JSON オブジェクト **1つのみ** を返してください（前置き・解説・Markdown見出し禁止。```json フェンスは可）。
-- ファイルの作成やコード実行は不要です。思考・下書きは内部で行い、最終メッセージには JSON だけを出力してください。
-- 配列の要素数はスキーマどおり厳密に守ってください（current_challenges=3, before_state=3, after_state=3, cx_highlights=3, architecture_nodes=4, roadmap_phases=3, quantitative_roi=3, qualitative_roi=3, next_steps=3）。
-- すべての文章は自然で説得力のある日本語で、クライアント固有の文脈（業界・課題・固有名詞）を反映してください。
-
-【JSON Schema】
-"""
-
-_MANAGED_AGENT_TERMINAL_STATUSES = {
-    "completed",
-    "failed",
-    "cancelled",
-    "canceled",
-    "incomplete",
-    "requires_action",
-    "errored",
-    "error",
-}
-
-
-def _synthesize_via_managed_agents(
-    prompt: str,
-    theme: str,
-    deadline_seconds: int,
-    status_callback: Callable[[str, str], None] | None = None,
-) -> tuple[PresentationDeckSpec | None, str, dict[str, Any]]:
-    """Runs the Antigravity base agent through the Managed Agents API (Interactions API, locations/global).
-
-    Uses `background=True` + polling with a hard deadline so a slow/hung sandbox can never block publication.
-    Returns (deck_or_None, raw_output_text, meta).
-    """
-    project_id = _get_project_id()
-    client = genai.Client(vertexai=True, project=project_id, location="global")
-    interactions_api = getattr(client, "interactions", None)
-    if interactions_api is None or not hasattr(interactions_api, "create"):
-        raise RuntimeError("google-genai SDK without Interactions API support")
-
-    full_prompt = (
-        prompt
-        + _MANAGED_AGENT_OUTPUT_CONTRACT
-        + json.dumps(PresentationDeckSpec.model_json_schema(), ensure_ascii=False)
-    )
-    started = time.monotonic()
-    interaction = interactions_api.create(
-        agent=MANAGED_AGENT_MODEL,
-        input=full_prompt,
-        environment={"type": "remote"},
-        background=True,
-        store=True,
-        stream=False,
-        timeout=120,
-    )
-    interaction_id = str(getattr(interaction, "id", "") or "")
-    if status_callback:
-        status_callback("managed_agents", f"interaction={interaction_id} started")
-    logger.info("Managed Agents interaction %s started (deadline=%ss)", interaction_id, deadline_seconds)
-
-    final = interaction
-    poll_interval = _get_managed_agent_poll_interval_seconds()
-    polls = 0
-    while True:
-        status = str(getattr(final, "status", "") or "").lower()
-        if status in _MANAGED_AGENT_TERMINAL_STATUSES:
-            break
-        elapsed = time.monotonic() - started
-        if elapsed > deadline_seconds:
-            try:
-                interactions_api.cancel(interaction_id)
-            except Exception as cancel_exc:  # noqa: BLE001
-                logger.info("Managed Agents cancel skipped: %s", cancel_exc)
-            raise TimeoutError(
-                f"Managed Agents interaction {interaction_id} exceeded {deadline_seconds}s (status={status})"
-            )
-        if poll_interval:
-            time.sleep(poll_interval)
-        polls += 1
-        final = interactions_api.get(interaction_id, timeout=60)
-        if status_callback and polls % 4 == 0:
-            status_callback(
-                "managed_agents",
-                f"interaction={interaction_id} status={getattr(final, 'status', '')} elapsed={int(time.monotonic() - started)}s",
-            )
-
-    elapsed_total = time.monotonic() - started
-    status = str(getattr(final, "status", "") or "").lower()
-    meta = {
-        "interaction_id": interaction_id,
-        "status": status,
-        "elapsed_seconds": round(elapsed_total, 1),
-    }
-    if status != "completed":
-        raise RuntimeError(
-            f"Managed Agents interaction {interaction_id} ended with status={status} errors={getattr(final, 'errors', None)}"
-        )
-    raw_text = str(getattr(final, "output_text", "") or "")
-    if not raw_text:
-        raise RuntimeError(f"Managed Agents interaction {interaction_id} completed without text output")
-    try:
-        return parse_deck_spec_text(raw_text, theme), raw_text, meta
-    except Exception as parse_exc:  # noqa: BLE001
-        logger.info("Managed Agents output needs schema repair: %s", parse_exc)
-        return None, raw_text, meta
 
 
 def _synthesize_via_gemini(
@@ -696,7 +683,7 @@ def _synthesize_via_gemini(
     project_id = _get_project_id()
     genai_location = _get_genai_location(model_name)
     candidate_locations = [genai_location]
-    if "global" not in candidate_locations:
+    if genai_location != "global":
         candidate_locations.append("global")
     last_exc: Exception | None = None
     for loc in candidate_locations:
@@ -746,27 +733,6 @@ def _synthesize_via_gemini(
     raise RuntimeError(f"Gemini synthesis failed on {candidate_locations}: {last_exc}")
 
 
-def _repair_deck_with_gemini(
-    raw_text: str,
-    theme: str,
-    model_name: str,
-    timeout_seconds: int,
-    status_callback: Callable[[str, str], None] | None = None,
-) -> PresentationDeckSpec:
-    """Normalizes a creative but non-conforming draft into the strict PresentationDeckSpec schema."""
-    repair_prompt = f"""以下は提案プレゼンテーション構成の下書き（JSONまたは自由記述）です。
-内容・固有名詞・数値をできる限り保持したまま、スキーマに**厳密に**適合する `PresentationDeckSpec` JSON に整形してください。
-要素数の不足は文脈に沿って補完し、超過分は重要度の高い順に絞り込んでください。希望テーマカラーは `{theme}` です。
-
-【下書き】:
-{raw_text[:20000]}
-"""
-    if status_callback:
-        status_callback("managed_agents_repair", f"schema repair with {model_name}")
-    deck, _ = _synthesize_via_gemini(repair_prompt, theme, model_name, timeout_seconds)
-    return deck
-
-
 def synthesize_deck_spec_with_skill(
     client_name: str,
     proposal_title: str,
@@ -774,16 +740,14 @@ def synthesize_deck_spec_with_skill(
     theme_color: str = "sky",
     knowledge_context: str = "",
     outline_hint: str = "",
-    managed_agent_deadline_seconds: int | None = None,
     status_callback: Callable[[str, str], None] | None = None,
+    design_style: str = DEFAULT_DESIGN_STYLE,
 ) -> tuple[PresentationDeckSpec, str]:
     """Synthesizes a 6-slide PresentationDeckSpec guided by the interactive-slide-designer skill.
 
     Tiered strategy (each tier is time-boxed so publication is always guaranteed):
-      1. Managed Agents API (`antigravity-preview-05-2026`, locations/global) within `MANAGED_AGENT_DEADLINE_SECONDS`
-         (default 10 min). Non-conforming output is schema-repaired with the fast Gemini model.
-      2. Fast Gemini structured output (`GEMINI_MODEL`, default gemini-3.8-flash).
-      3. Deterministic skill template (offline / last resort).
+      1. Gemini structured output (`GEMINI_MODEL`, default gemini-3.8-flash) within `FAST_MODEL_TIMEOUT_SECONDS`.
+      2. Deterministic skill template (offline / last resort).
     Returns (deck_spec, engine_used).
     """
     skill_text = load_interactive_slide_designer_skill()
@@ -796,39 +760,12 @@ def synthesize_deck_spec_with_skill(
         knowledge_context=knowledge_context,
         outline_hint=outline_hint,
         skill_text=skill_text,
+        design_style=normalize_design_style(design_style),
     )
     fast_model = _get_model_name()
     fast_timeout = _get_fast_model_timeout_seconds()
-    deadline = managed_agent_deadline_seconds or _get_managed_agent_deadline_seconds()
 
-    # 1. Managed Agents API (Antigravity harness) with hard deadline
-    if _managed_agents_enabled():
-        try:
-            deck_obj, raw_text, meta = _synthesize_via_managed_agents(
-                prompt, theme, deadline, status_callback
-            )
-            if deck_obj is not None:
-                return deck_obj, f"managed_agents_api:{MANAGED_AGENT_MODEL}"
-            try:
-                repaired = _repair_deck_with_gemini(
-                    raw_text, theme, fast_model, fast_timeout, status_callback
-                )
-                return repaired, f"managed_agents_api:{MANAGED_AGENT_MODEL}+schema_repair:{fast_model}"
-            except Exception as repair_exc:  # noqa: BLE001
-                logger.warning(
-                    "Managed Agents output (%s) could not be repaired, falling back: %s",
-                    meta.get("interaction_id"),
-                    repair_exc,
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Managed Agents API (%s) fallback to %s: %s",
-                MANAGED_AGENT_MODEL,
-                fast_model,
-                exc,
-            )
-
-    # 2. Fast Gemini structured output with skill instructions
+    # 1. Gemini structured output with skill instructions
     try:
         deck_obj, _ = _synthesize_via_gemini(
             prompt, theme, fast_model, fast_timeout, status_callback
@@ -837,7 +774,7 @@ def synthesize_deck_spec_with_skill(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Gemini structured synthesis fallback triggered: %s", exc)
 
-    # 3. Deterministic fallback (e.g. unit test environment without external network)
+    # 2. Deterministic fallback (e.g. unit test environment without external network)
     if status_callback:
         status_callback("deterministic_template", "offline template synthesis")
     return (
@@ -851,21 +788,506 @@ def synthesize_deck_spec_with_skill(
     )
 
 
+_FREEFORM_FALLBACK_REASON_LABELS = {
+    "freeform_disabled": "自由デザイン機能が無効のため",
+    "no_index": "デザイナーエージェントがスライドを書き出せなかったため",
+    "unpublishable": "検証を通過する自由デザイン版がなかったため",
+    "error": "自由デザインの生成中にエラーが発生したため",
+}
+
+
 def describe_generation_engine(engine: str) -> str:
     """Human-readable Japanese label for a `generation_engine` value stored in Firestore."""
-    eng = (engine or "").lower()
-    if eng.startswith("managed_agents_api"):
-        label = "Managed Agents API（Antigravity ハーネス）で生成"
-        if "schema_repair" in eng:
-            label += "（スキーマ整形は gemini-3.8-flash が補助）"
-        return label
+    raw = (engine or "").strip()
+    base_raw, _, fallback = raw.partition("+freeform_fallback:")
+    eng = base_raw.lower()
+    if fallback:
+        if eng.startswith("agent_platform_gemini_with_skill"):
+            model = base_raw.split(":", 1)[1] if ":" in base_raw else _get_model_name()
+            inner = f"{model} 高速生成"
+        elif eng.startswith("deterministic_skill_template"):
+            inner = "スキルテンプレートによる即時生成"
+        else:
+            inner = describe_generation_engine(base_raw)
+        reason = _FREEFORM_FALLBACK_REASON_LABELS.get(
+            fallback.strip().lower(), "自由デザイン版を公開できなかったため"
+        )
+        return f"{reason}、テンプレートで仕上げました（{inner}）"
+    if eng.startswith("adk_freeform"):
+        model = base_raw.split(":", 1)[1] if ":" in base_raw else _get_model_name()
+        return f"ADK エージェント（{model}）による自由デザイン（描画結果をエージェント自身が確認して修正）"
     if eng.startswith("agent_platform_gemini_with_skill"):
-        return "gemini-3.8-flash 高速生成（Managed Agents API が時間予算超過または失敗したため自動切替）"
+        model = base_raw.split(":", 1)[1] if ":" in base_raw else _get_model_name()
+        return f"{model} によるテンプレート高速生成（構造化出力）"
     if eng.startswith("deterministic_skill_template"):
         return "スキルテンプレートによる即時生成（オフライン／最終フォールバック）"
     if eng == "state_deck_spec":
         return "対話で確定した構成データをそのまま反映"
     return engine or "不明"
+
+
+def describe_edit_engine(engine: str) -> str:
+    """Human-readable Japanese label for the engine that applied an edit."""
+    eng = (engine or "").strip()
+    low = eng.lower()
+    if low.startswith("adk_freeform"):
+        model = eng.split(":", 1)[1] if ":" in eng else _get_model_name()
+        return f"ADK エージェント（{model}）による自由デザインの修正（描画結果をエージェント自身が確認して修正）"
+    if low == "freeform_undo":
+        return "自由デザイン版の取り消し（1つ前の版に表示を切り替え）"
+    if low.startswith("gemini:"):
+        model = eng.split(":", 1)[1].split("@", 1)[0] or _get_model_name()
+        return f"{model} による修正（構造化出力・デザインシステム適用）"
+    if low.startswith("heuristic:llm_unavailable"):
+        return "キーワード解析による修正（LLM が応答しなかったため自動切替）"
+    if low.startswith("heuristic"):
+        return "キーワード解析による修正"
+    if low == "explicit":
+        return "指定された値をそのまま反映"
+    if low == "undo":
+        return "直前の修正の取り消し（1つ前の版に復元）"
+    return eng or "不明"
+
+
+# ---------------------------------------------------------------------------
+# Design modes: free-form (ADK designer agent + visual review loop) vs template (fast mode)
+# ---------------------------------------------------------------------------
+FREEFORM_CREATE_ETA = "通常 7〜11 分（最長約 20 分）"
+FREEFORM_EDIT_ETA = "通常 5〜7 分（最長約 15 分）"
+
+_PHASE_LABELS = {
+    "queued": "開始待ち（ジョブ起動中）",
+    "knowledge_search": "社内ナレッジ検索",
+    "deterministic_template": "テンプレート生成",
+    "rendering": "HTML の組み立て",
+    "freeform_staging": "素材の準備",
+    "freeform_drafting": "デザイナーエージェントが制作中",
+    "freeform_images": "AI イメージの生成",
+    "freeform_checking": "描画して見た目を検査中",
+    "freeform_reviewing": "エージェントがスクリーンショットを見て修正中",
+    "freeform_publishing": "公開処理",
+    "freeform_fallback": "テンプレートで仕上げ中",
+    "freeform_edit_queued": "修正の開始待ち（ジョブ起動中）",
+    "edit_queued": "修正の開始待ち",
+    "edit_designing": "修正内容の設計",
+    "edit_rendering": "HTML の組み立て",
+    "edit_publishing": "公開処理",
+    "ready": "完了",
+    "failed": "失敗",
+}
+
+
+def _phase_label(phase: str) -> str:
+    return _PHASE_LABELS.get(phase or "", phase or "")
+
+
+def _freeform_enabled() -> bool:
+    return os.environ.get("FREEFORM_DESIGN_ENABLED", "false").strip().lower() in ("1", "true", "yes")
+
+
+def _normalize_design_mode(value: Any) -> str:
+    """Returns 'freeform', 'template' or '' (not specified)."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if any(key in text for key in ("template", "fast", "quick", "standard", "テンプレ", "高速", "定型")):
+        return "template"
+    if any(key in text for key in ("free", "custom", "creative", "自由")):
+        return "freeform"
+    return ""
+
+
+def _resolve_design_mode(requested: Any) -> str:
+    """Free-form is the default when enabled; the template is used on request (fast mode) or when disabled."""
+    if _normalize_design_mode(requested) == "template":
+        return "template"
+    return "freeform" if _freeform_enabled() else "template"
+
+
+# ---------------------------------------------------------------------------
+# Deck Edit Engine (design-system aware edits + truthful, diff-based change reporting)
+# ---------------------------------------------------------------------------
+
+
+class DeckEditResult(BaseModel):
+    """Structured output of the LLM edit step."""
+
+    deck_spec: PresentationDeckSpec = Field(
+        description="修正指示を反映した新しい PresentationDeckSpec（指示のない項目は現在の値のまま）"
+    )
+    change_summary: list[str] = Field(
+        default_factory=list,
+        description="実際に変更した点（日本語で具体的に、最大8項目。変更していないことは書かない）",
+    )
+    unsupported_requests: list[str] = Field(
+        default_factory=list,
+        description="テンプレートの制約で反映できなかった要望（例：スライドの追加、画像・動画の埋め込み）",
+    )
+
+
+DESIGN_SYSTEM_GUIDE = """【デザインシステム（このテンプレートで変更できること）】
+- design_style（全体の見た目。背景色・文字色・カードの質感がまとめて切り替わります）:
+  - immersive-dark: 濃紺〜黒の背景・白文字・半透明ガラス風カード・グロー効果（既定）
+  - clean-light: 真っ白な背景・濃いグレーの文字・白カードと薄い影・上部のアクセントライン。明るくミニマルな印象
+  - editorial-light: 生成り色（#faf7f2）の背景・明朝体の見出し・フラットで角ばったカード。雑誌やレポートのような上品な印象
+- theme_color（アクセントカラー）: sky / emerald / violet / amber / rose
+- custom_css（任意の追加CSS。フォント・角丸・余白・線・影・文字サイズなどの微調整用。通常は空文字）:
+  - 使えるフォント: 'Plus Jakarta Sans'、'Noto Sans JP'、'JetBrains Mono'（editorial-light では 'Noto Serif JP' も可）、serif / sans-serif などの汎用フォント
+  - 主なセレクタ: body[data-style], header, footer, .slide, section[data-layout="hero-cover"]（ほかに bento-executive-summary / as-is-to-be-comparison / architecture-flow / roadmap-timeline / roi-and-next-steps）, .glass-card, h1, h2, h3, h4, p, li, #progress-bar, #prev-btn, #next-btn
+  - Tailwind のユーティリティより優先されるよう、各宣言の末尾に !important を付けてください
+  - 禁止: url()・@import・@font-face・外部リソース・山括弧・バックスラッシュ。8000文字以内
+- スライド構成は固定の6枚です（表紙／課題と結論／As-Is・To-Be／アーキテクチャ4層／ロードマップ3フェーズ／ROIとネクストステップ）。スライドの追加・削除・並べ替え、画像・動画・グラフの埋め込みはできません。
+"""
+
+_EDIT_REGEX_FLAGS = re.IGNORECASE | re.ASCII
+
+_EDIT_STYLE_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("editorial-light", r"エディトリアル|雑誌|マガジン|明朝|\beditorial\b|\bmagazine\b|\bserif\b"),
+    (
+        "clean-light",
+        r"背景[^。、\n]{0,8}(白|ホワイト|明る)|(白|ホワイト)[^。、\n]{0,4}背景|白基調|白ベース"
+        r"|(?<![空明])白(っぽ|く|に|系|色)|ホワイト|(?<![イト])ライト"
+        r"|明るい(配色|デザイン|雰囲気|見た目|トーン|色|背景)|(配色|デザイン|雰囲気|見た目|トーン|背景)を?明るく"
+        r"|\bwhite\b|\blight\b",
+    ),
+    (
+        "immersive-dark",
+        r"背景[^。、\n]{0,8}(黒|ダーク|暗)|(黒|ダーク)[^。、\n]{0,4}背景|黒基調|ダーク"
+        r"|暗い(配色|デザイン|雰囲気|見た目|トーン|色|背景)|(配色|デザイン|雰囲気|見た目|トーン|背景)を?暗く"
+        r"|\bdark\b|\bblack\b",
+    ),
+)
+_COLOR_SUFFIX = r"(系|色|基調|っぽ|に|へ|で|を)"
+_EDIT_THEME_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("sky", r"\bsky\b|スカイ|水色|(青|ブルー)" + _COLOR_SUFFIX),
+    ("emerald", r"\bemerald\b|エメラルド|(緑|グリーン)" + _COLOR_SUFFIX),
+    ("violet", r"\bviolet\b|バイオレット|(紫|パープル)" + _COLOR_SUFFIX),
+    ("amber", r"\bamber\b|アンバー|オレンジ|(黄|イエロー|ゴールド|金)" + _COLOR_SUFFIX),
+    ("rose", r"\brose\b|ローズ|(ピンク|赤|レッド)" + _COLOR_SUFFIX),
+)
+_EDIT_DRASTIC_PATTERN = (
+    r"ぜんぜん違|全然違|まったく違|全く違|がらっと|ガラッと|一新|刷新|別物"
+    r"|雰囲気を変|見た目を変|デザインを変|印象を変|different\s+look|redesign|completely\s+different"
+)
+_ALTERNATE_THEME = {"sky": "violet", "violet": "emerald", "emerald": "amber", "amber": "rose", "rose": "sky"}
+
+
+def _last_match_positions(patterns: tuple[tuple[str, str], ...], text: str) -> dict[str, int]:
+    positions: dict[str, int] = {}
+    for value, pattern in patterns:
+        for match in re.finditer(pattern, text or "", flags=_EDIT_REGEX_FLAGS):
+            positions[value] = match.start()
+    return positions
+
+
+def _detect_requested_style(text: str) -> str:
+    """Returns the design style a natural-language request asks for (last mention wins), or ''."""
+    positions = _last_match_positions(_EDIT_STYLE_PATTERNS, text)
+    if not positions:
+        return ""
+    winner = max(positions, key=lambda key: positions[key])
+    if winner == "clean-light" and "editorial-light" in positions:
+        return "editorial-light"
+    return winner
+
+
+def _detect_requested_theme(text: str) -> str:
+    """Returns the accent colour a request names (last mention wins), or ''."""
+    positions = _last_match_positions(_EDIT_THEME_PATTERNS, text)
+    if not positions:
+        return ""
+    return max(positions, key=lambda key: positions[key])
+
+
+def _is_drastic_redesign(text: str) -> bool:
+    return bool(re.search(_EDIT_DRASTIC_PATTERN, text or "", flags=_EDIT_REGEX_FLAGS))
+
+
+def _style_family(style: str) -> str:
+    return "light" if style in ("clean-light", "editorial-light") else "dark"
+
+
+def _apply_edit_heuristics(
+    current: PresentationDeckSpec,
+    candidate: PresentationDeckSpec,
+    instructions: str,
+    llm_used: bool,
+) -> tuple[PresentationDeckSpec, list[str]]:
+    """Deterministic safety net: explicit look-and-feel requests are always visibly applied.
+
+    Without the LLM this is the whole edit engine; with the LLM it only corrects answers that ignored a clear
+    request (e.g. "背景を白に" answered with a dark style).
+    """
+    notes: list[str] = []
+    if not instructions:
+        return candidate, notes
+    candidate_style = normalize_design_style(candidate.design_style)
+    req_style = _detect_requested_style(instructions)
+    req_theme = _detect_requested_theme(instructions)
+    if req_style:
+        if not llm_used and candidate_style != req_style:
+            candidate.design_style = req_style
+            notes.append(f"キーワード解析: design_style を {req_style} に設定")
+        elif llm_used and _style_family(candidate_style) != _style_family(req_style):
+            candidate.design_style = req_style
+            notes.append(f"補正: 指示と異なる design_style が返されたため {req_style} に修正")
+    if req_theme and candidate.theme_color != req_theme:
+        if not llm_used or candidate.theme_color == current.theme_color:
+            candidate.theme_color = req_theme
+            notes.append(f"キーワード解析: theme_color を {req_theme} に設定")
+    if _is_drastic_redesign(instructions):
+        if normalize_design_style(candidate.design_style) == current.design_style and not req_style:
+            candidate.design_style = (
+                "clean-light" if _style_family(current.design_style) == "dark" else "immersive-dark"
+            )
+            notes.append(f"大幅な変更の指示のため design_style を {candidate.design_style} に変更")
+        if candidate.theme_color == current.theme_color and not req_theme:
+            candidate.theme_color = _ALTERNATE_THEME.get(current.theme_color, "violet")
+            notes.append(f"大幅な変更の指示のため theme_color を {candidate.theme_color} に変更")
+    return candidate, notes
+
+
+_SPEC_CHANGE_LABELS: tuple[tuple[str, str], ...] = (
+    ("design_style", "デザインスタイル"),
+    ("theme_color", "アクセントカラー"),
+    ("custom_css", "カスタムCSS"),
+    ("client_name", "クライアント名"),
+    ("proposal_title", "タイトル（表紙）"),
+    ("subtitle", "サブタイトル（表紙）"),
+    ("custom_callout", "表紙のハイライト"),
+    ("current_challenges", "スライド2：現状の課題"),
+    ("executive_conclusion", "スライド2：結論メッセージ"),
+    ("before_state", "スライド3：As-Is（従来）"),
+    ("after_state", "スライド3：To-Be（変革後）"),
+    ("cx_highlights", "スライド3：UX/AIハイライト"),
+    ("architecture_nodes", "スライド4：アーキテクチャ4層"),
+    ("roadmap_phases", "スライド5：ロードマップ"),
+    ("quantitative_roi", "スライド6：定量効果"),
+    ("qualitative_roi", "スライド6：定性効果"),
+    ("next_steps", "スライド6：ネクストステップ"),
+)
+
+
+def _clip(value: Any, limit: int = 40) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def describe_deck_changes(
+    old: PresentationDeckSpec, new: PresentationDeckSpec
+) -> tuple[list[str], list[str]]:
+    """Deterministic diff -> (changed field names, human-readable Japanese list of what visibly changed)."""
+    before, after = old.model_dump(), new.model_dump()
+    changed: list[str] = []
+    readable: list[str] = []
+    for field_name, label in _SPEC_CHANGE_LABELS:
+        old_value, new_value = before.get(field_name), after.get(field_name)
+        if old_value == new_value:
+            continue
+        changed.append(field_name)
+        if field_name == "design_style":
+            readable.append(
+                f"{label}: {DESIGN_STYLE_LABELS.get(str(old_value), old_value)} → "
+                f"{DESIGN_STYLE_LABELS.get(str(new_value), new_value)}"
+            )
+        elif field_name == "theme_color":
+            readable.append(f"{label}: {old_value} → {new_value}")
+        elif field_name == "custom_css":
+            readable.append(f"{label}: 適用（{len(str(new_value))}文字）" if new_value else f"{label}: 削除")
+        elif isinstance(new_value, list):
+            old_list = old_value if isinstance(old_value, list) else []
+            total = max(len(old_list), len(new_value))
+            count = sum(
+                1
+                for idx in range(total)
+                if (old_list[idx] if idx < len(old_list) else None)
+                != (new_value[idx] if idx < len(new_value) else None)
+            )
+            readable.append(f"{label}: {count}項目を更新")
+        else:
+            readable.append(f"{label}: 「{_clip(old_value)}」→「{_clip(new_value)}」")
+    return changed, readable
+
+
+def _build_edit_prompt(
+    deck_obj: PresentationDeckSpec,
+    edit_instructions: str,
+    explicit_changes: dict[str, str],
+) -> str:
+    explicit_block = ""
+    if explicit_changes:
+        lines = "\n".join(f"- {key}: {value}" for key, value in explicit_changes.items())
+        explicit_block = f"\n【必ずこの値にする項目（ユーザー指定）】\n{lines}\n"
+    instructions_text = edit_instructions or "（自然文の指示なし。下記の指定値のみ反映）"
+    current_json = json.dumps(deck_obj.model_dump(), ensure_ascii=False, indent=2)
+    return f"""あなたはエグゼクティブ提案デザイナーです。公開中の6枚構成HTMLプレゼンテーション（テンプレートでレンダリング）に対するユーザーの修正指示を、構成データ `PresentationDeckSpec` に反映してください。
+
+{DESIGN_SYSTEM_GUIDE}
+【反映ルール】
+1. 指示された点は、見た目で分かるレベルで確実に反映してください。指示のない項目は現在の値をそのまま維持してください。
+2. 「背景を白に」「明るく」なら design_style を clean-light に（上品・雑誌風なら editorial-light）。「暗く」「ダークに」なら immersive-dark にしてください。
+3. 「ぜんぜん違う見た目」「雰囲気を一新」のような大幅な変更では、design_style と theme_color の両方を現在と違う値にし、必要に応じて custom_css でフォント・角丸・線などの質感も変えて、違いがひと目で分かるようにしてください。
+4. 文言の修正は該当スライドのフィールドだけを書き換えてください。配列の要素数（課題3・As-Is 3・To-Be 3・CX 3・アーキテクチャ4・ロードマップ3・定量ROI 3・定性ROI 3・ネクストステップ3）は必ず守ってください。
+5. change_summary には実際に変更した点だけを書いてください。テンプレートの制約で反映できない要望は unsupported_requests に入れてください。
+6. 製品名は現行の正式名称（Gemini Enterprise Agent Platform / Agent Runtime / Agent Search / Gemini 3.8 Flash / BigQuery / Cloud Run）で表記し、旧称は使わないでください。
+
+【現在の PresentationDeckSpec JSON】
+{current_json}
+
+【ユーザーの修正指示】
+{instructions_text}
+{explicit_block}"""
+
+
+def parse_edit_result_text(raw_text: str) -> DeckEditResult:
+    """Parses the LLM edit answer (DeckEditResult JSON, or a bare PresentationDeckSpec JSON) leniently."""
+    payload_text = _extract_json_object_text(raw_text)
+    try:
+        return DeckEditResult.model_validate_json(payload_text)
+    except Exception:  # noqa: BLE001
+        return DeckEditResult(deck_spec=PresentationDeckSpec.model_validate_json(payload_text))
+
+
+def _llm_edit_enabled() -> bool:
+    return os.environ.get("ENABLE_LLM_DECK_EDIT", "true").lower() in ("true", "1")
+
+
+def _get_edit_model_timeout_seconds() -> int:
+    try:
+        return max(20, int(os.environ.get("EDIT_MODEL_TIMEOUT_SECONDS", "75")))
+    except ValueError:
+        return 75
+
+
+def _get_edit_stale_seconds() -> int:
+    """An 'updating' marker older than this is treated as abandoned (crashed edit) and never blocks viewers."""
+    try:
+        return max(60, int(os.environ.get("EDIT_STALE_SECONDS", "300")))
+    except ValueError:
+        return 300
+
+
+def _utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _seconds_since(iso_value: Any) -> float | None:
+    if not iso_value:
+        return None
+    try:
+        moment = datetime.datetime.fromisoformat(str(iso_value))
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=datetime.timezone.utc)
+        return round((datetime.datetime.now(datetime.timezone.utc) - moment).total_seconds(), 1)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _get_freeform_edit_stale_seconds() -> int:
+    """Free-form edits run as a background job (cold start + agent turns + review loop), so they get longer."""
+    try:
+        return max(300, int(os.environ.get("FREEFORM_EDIT_STALE_SECONDS", "1500")))
+    except ValueError:
+        return 1500
+
+
+def _is_freeform_edit(doc: dict[str, Any]) -> bool:
+    request = doc.get("edit_request")
+    return isinstance(request, dict) and request.get("mode") == "freeform"
+
+
+def _is_freeform_rendered(doc: dict[str, Any]) -> bool:
+    """True when the share URL currently serves a free-form version (presentations/<id>/v<N>/)."""
+    return doc.get("render_mode") == "freeform" and bool(doc.get("freeform_prefix"))
+
+
+def _doc_design_mode(doc: dict[str, Any]) -> str:
+    if _is_freeform_rendered(doc):
+        return "freeform"
+    inputs = doc.get("generation_inputs") if isinstance(doc.get("generation_inputs"), dict) else {}
+    mode = str(doc.get("design_mode") or inputs.get("design_mode") or "")
+    return "freeform" if mode == "freeform" else "template"
+
+
+def _is_edit_stale(doc: dict[str, Any]) -> bool:
+    elapsed = _seconds_since(doc.get("edit_requested_at") or doc.get("updated_at"))
+    limit = _get_freeform_edit_stale_seconds() if _is_freeform_edit(doc) else _get_edit_stale_seconds()
+    return elapsed is None or elapsed > limit
+
+
+def _content_version_of(doc: dict[str, Any]) -> int:
+    try:
+        return max(0, int(doc.get("content_version") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _public_last_edit(last_edit: Any) -> dict[str, Any]:
+    if not isinstance(last_edit, dict) or not last_edit:
+        return {}
+    keys = (
+        "status",
+        "kind",
+        "edit_engine_label",
+        "verified_changes",
+        "designer_notes",
+        "unsupported_requests",
+        "content_version",
+        "freeform_version",
+        "previous_freeform_version",
+        "review_rounds",
+        "warnings",
+        "design_style",
+        "elapsed_seconds",
+        "applied_at",
+        "error",
+    )
+    return {key: last_edit.get(key) for key in keys if key in last_edit}
+
+
+def _edit_deck_with_gemini(
+    deck_obj: PresentationDeckSpec,
+    edit_instructions: str,
+    explicit_changes: dict[str, str],
+) -> tuple[DeckEditResult, str]:
+    """Structured-output edit with the fast Gemini model (time-boxed). Returns (result, 'model@location')."""
+    model_name = _get_model_name()
+    timeout_seconds = _get_edit_model_timeout_seconds()
+    prompt = _build_edit_prompt(deck_obj, edit_instructions, explicit_changes)
+    project_id = _get_project_id()
+    genai_location = _get_genai_location(model_name)
+    candidate_locations = [genai_location]
+    if genai_location != "global":
+        candidate_locations.append("global")
+    last_exc: Exception | None = None
+    for loc in candidate_locations:
+        try:
+            try:
+                client = genai.Client(
+                    vertexai=True,
+                    project=project_id,
+                    location=loc,
+                    http_options=types.HttpOptions(timeout=timeout_seconds * 1000),
+                )
+            except TypeError:
+                client = genai.Client(vertexai=True, project=project_id, location=loc)
+            resp = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=DeckEditResult,
+                    temperature=0.3,
+                ),
+            )
+            text = str(getattr(resp, "text", "") or "")
+            if not text:
+                raise RuntimeError("empty response text")
+            return parse_edit_result_text(text), f"{model_name}@{loc}"
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.warning("LLM deck edit (%s at %s) failed: %s", model_name, loc, exc)
+    raise RuntimeError(f"LLM deck edit failed on {candidate_locations}: {last_exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -874,7 +1296,14 @@ def describe_generation_engine(engine: str) -> str:
 
 
 def search_internal_knowledge(query: str) -> str:
-    """Searches internal Agent Search datastore for past proposals, RFPs, case studies, and CRM context."""
+    """Searches internal Agent Search datastore for past proposals, RFPs, case studies, and CRM context.
+
+    Args:
+        query: Search keywords (such as client name, industry, UX/CDP/AI theme, or RFP requirements).
+
+    Returns:
+        JSON string containing matched internal documents, snippets, and structured metadata.
+    """
     project_id = _get_project_id()
     location = _get_datastore_location()
     datastore_id = _get_datastore_id()
@@ -974,6 +1403,7 @@ def search_internal_knowledge(query: str) -> str:
     )
 
 
+# Backwards-compatible alias
 search_proposal_datastore = search_internal_knowledge
 
 
@@ -983,6 +1413,7 @@ search_proposal_datastore = search_internal_knowledge
 
 
 def _extract_deck_dict_from_state(raw_deck: Any) -> dict[str, Any]:
+    """Normalizes deck_spec stored in ToolContext state or JSON string into a dictionary."""
     if isinstance(raw_deck, PresentationDeckSpec):
         return raw_deck.model_dump()
     if isinstance(raw_deck, dict):
@@ -1036,14 +1467,20 @@ def _get_generation_job_name() -> str:
     return ""
 
 
-def _get_generation_stale_minutes() -> int:
+def _get_generation_stale_minutes(doc: dict[str, Any] | None = None) -> int:
+    """Generations older than this are completed with the template. Free-form runs get a longer budget."""
+    if doc is not None and _doc_design_mode(doc) == "freeform":
+        try:
+            return max(10, int(os.environ.get("FREEFORM_GENERATION_STALE_MINUTES", "22")))
+        except ValueError:
+            return 22
     try:
         return max(5, int(os.environ.get("GENERATION_STALE_MINUTES", "13")))
     except ValueError:
         return 13
 
 
-def _run_cloud_run_generation_job(job_name: str, presentation_id: str) -> str:
+def _run_cloud_run_generation_job(job_name: str, presentation_id: str, job_mode: str = "generate") -> str:
     """Triggers the generation Cloud Run Job (REST v2 `jobs.run` with env overrides). Returns the execution/operation name."""
     import google.auth
     from google.auth.transport.requests import AuthorizedSession
@@ -1056,7 +1493,12 @@ def _run_cloud_run_generation_job(job_name: str, presentation_id: str) -> str:
     body = {
         "overrides": {
             "containerOverrides": [
-                {"env": [{"name": "PRESENTATION_ID", "value": presentation_id}]}
+                {
+                    "env": [
+                        {"name": "PRESENTATION_ID", "value": presentation_id},
+                        {"name": "JOB_MODE", "value": job_mode or "generate"},
+                    ]
+                }
             ],
             "taskCount": 1,
         }
@@ -1072,30 +1514,38 @@ def _run_cloud_run_generation_job(job_name: str, presentation_id: str) -> str:
     )
 
 
-def _run_generation_inline_thread(presentation_id: str) -> None:
-    from app.generation_worker import generate_presentation
+def _run_generation_inline_thread(presentation_id: str, job_mode: str = "generate") -> None:
+    from app.generation_worker import run_job
 
     try:
-        generate_presentation(presentation_id)
+        run_job(presentation_id, job_mode)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Inline background generation failed for %s: %s", presentation_id, exc)
+        logger.exception("Inline background %s failed for %s: %s", job_mode, presentation_id, exc)
 
 
-def _start_background_generation(presentation_id: str) -> dict[str, Any]:
-    """Kicks off asynchronous deck generation and returns how it was dispatched (never raises)."""
+def _start_background_generation(presentation_id: str, job_mode: str = "generate") -> dict[str, Any]:
+    """Kicks off the background job and returns how it was dispatched (never raises).
+
+    `job_mode` is `generate` (first generation) or `freeform_edit` (queued free-form edit / conversion).
+    """
     mode = _get_generation_trigger_mode()
     job_name = _get_generation_job_name()
     if mode == "none":
-        return {"mode": "none"}
+        return {"mode": "none", "job_mode": job_mode}
     if mode == "sync":
-        from app.generation_worker import generate_presentation
+        from app.generation_worker import run_job
 
-        result = generate_presentation(presentation_id)
-        return {"mode": "sync", "worker_result": result}
+        result = run_job(presentation_id, job_mode)
+        return {"mode": "sync", "job_mode": job_mode, "worker_result": result}
     if mode in ("auto", "cloud_run_job") and job_name:
         try:
-            execution = _run_cloud_run_generation_job(job_name, presentation_id)
-            return {"mode": "cloud_run_job", "job_name": job_name, "execution": execution}
+            execution = _run_cloud_run_generation_job(job_name, presentation_id, job_mode)
+            return {
+                "mode": "cloud_run_job",
+                "job_mode": job_mode,
+                "job_name": job_name,
+                "execution": execution,
+            }
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Cloud Run Job trigger failed (%s); falling back to inline thread: %s",
@@ -1103,15 +1553,15 @@ def _start_background_generation(presentation_id: str) -> dict[str, Any]:
                 exc,
             )
             if mode == "cloud_run_job":
-                return {"mode": "cloud_run_job_failed", "error": str(exc)[:300]}
+                return {"mode": "cloud_run_job_failed", "job_mode": job_mode, "error": str(exc)[:300]}
     worker = threading.Thread(
         target=_run_generation_inline_thread,
-        args=(presentation_id,),
-        name=f"proposal-gen-{presentation_id}",
+        args=(presentation_id, job_mode),
+        name=f"proposal-{job_mode}-{presentation_id}",
         daemon=True,
     )
     worker.start()
-    return {"mode": "inline_thread"}
+    return {"mode": "inline_thread", "job_mode": job_mode}
 
 
 def _tool_error(exc: Exception, action: str, **extra: Any) -> dict[str, Any]:
@@ -1142,14 +1592,24 @@ def create_proposal_website(
     theme_color: str = "sky",
     expiration_days: int = 14,
     deck_spec_json: str = "",
+    design_style: str = "",
+    design_mode: str = "",
+    design_request: str = "",
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
-    """Issues the share URL / viewer ID / password immediately and generates the 6-slide HTML5 proposal website in the background.
+    """Issues the share URL / viewer ID / password immediately and generates the HTML5 proposal website in the background.
 
     Call this tool ONLY when the user explicitly asks to generate/publish a proposal website or approves an outline.
     Do NOT call this tool when the user only says a greeting like 'こんにちは'.
     Pass the agreed outline as natural language inside `proposal_brief`; use `deck_spec_json` only for a complete
     PresentationDeckSpec JSON (non-conforming JSON is accepted and treated as an outline hint, never an error).
+
+    Design modes:
+      * 'freeform' (default): an ADK designer agent (gemini-3.8-flash) freely designs the deck (number of slides,
+        layouts, SVG diagrams, ECharts graphs and up to 4 AI-generated images when useful). The worker renders it
+        in headless Chromium and shows the screenshots to the same agent, which fixes its own files (up to 2 review
+        rounds) before publication. Typically 7-10 minutes.
+      * 'template' (fast mode): the fixed 6-slide template, typically 1-5 minutes.
 
     Args:
         client_name: Target client company name (e.g., '株式会社サンプル商事').
@@ -1158,13 +1618,18 @@ def create_proposal_website(
         theme_color: Visual accent theme ('sky', 'emerald', 'violet', 'amber', or 'rose').
         expiration_days: Number of days until the shared URL expires (default 14).
         deck_spec_json: Optional full JSON string matching PresentationDeckSpec.
+        design_style: Optional overall look for the template: 'immersive-dark' (dark navy, default), 'clean-light'
+            (white background, minimal) or 'editorial-light' (off-white, serif headings).
+        design_mode: 'freeform' (default) or 'template' (only when the user asks for 高速モード / テンプレート / speed).
+        design_request: The user's look-and-feel wishes in their own words (background colour, mood, charts, graphs,
+            diagrams, images, number of slides). Used by the free-form designer.
         tool_context: Optional ADK ToolContext.
 
     Returns:
         Dictionary with `status` ('GENERATING' while the background generation runs, 'PUBLISHED' when the deck is already
         complete, or 'ERROR'), `presentation_id`, `share_url`, `viewer_id`, `viewer_password`, `expires_at`,
-        `generation_status`, and `next_action` guidance. The share URL shows a "生成中" page until the deck is ready and
-        then switches to the finished presentation automatically.
+        `design_mode`, `estimated_completion`, `generation_status`, and `next_action`.
+        The share URL shows a "生成中" page until the deck is ready and then switches to it automatically.
     """
     try:
         return _create_proposal_website_impl(
@@ -1175,6 +1640,9 @@ def create_proposal_website(
             expiration_days=expiration_days,
             deck_spec_json=deck_spec_json,
             tool_context=tool_context,
+            design_style=design_style,
+            design_mode=design_mode,
+            design_request=design_request,
         )
     except Exception as exc:  # noqa: BLE001
         return _tool_error(
@@ -1192,6 +1660,9 @@ def _create_proposal_website_impl(
     expiration_days: int,
     deck_spec_json: str,
     tool_context: ToolContext | None,
+    design_style: str = "",
+    design_mode: str = "",
+    design_request: str = "",
 ) -> dict[str, Any]:
     raw_spec = tool_context.state.get("deck_spec") if tool_context else None
     if not raw_spec and deck_spec_json:
@@ -1199,6 +1670,11 @@ def _create_proposal_website_impl(
 
     theme = theme_color if theme_color in SUPPORTED_THEME_COLORS else "sky"
     deck_obj, outline_hint = _coerce_deck_spec(raw_spec, theme)
+    mode = _resolve_design_mode(design_mode)
+    design_request_text = (design_request or "").strip()[:2000]
+    requested_style = (
+        normalize_design_style(design_style, default="") if (design_style or "").strip() else ""
+    ) or _detect_requested_style(f"{proposal_title} {proposal_brief} {design_request_text}")
 
     eff_client = (client_name or "").strip()
     eff_title = (proposal_title or "").strip()
@@ -1207,7 +1683,7 @@ def _create_proposal_website_impl(
         eff_client = eff_client or deck_obj.client_name
         eff_title = eff_title or deck_obj.proposal_title
         eff_brief = eff_brief or deck_obj.subtitle
-    if not eff_client and not eff_title and not eff_brief and not outline_hint:
+    if not eff_client and not eff_title and not eff_brief and not outline_hint and not design_request_text:
         return {
             "status": "ERROR",
             "action": "create_proposal_website",
@@ -1219,6 +1695,9 @@ def _create_proposal_website_impl(
     eff_client = eff_client or "クライアント企業"
     eff_title = eff_title or f"{eff_client}様向け AI×UX変革ご提案プレゼンテーション"
     eff_brief = eff_brief or eff_title
+    if deck_obj is not None and mode == "freeform":
+        # A complete template spec is still good content for the free-form designer.
+        outline_hint = outline_hint or json.dumps(deck_obj.model_dump(), ensure_ascii=False)[:6000]
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     now_jst = now_utc.astimezone(datetime.timezone(datetime.timedelta(hours=9)))
@@ -1260,6 +1739,9 @@ def _create_proposal_website_impl(
         "proposal_title": eff_title,
         "subtitle": eff_brief[:160],
         "theme_color": theme,
+        "design_style": requested_style or DEFAULT_DESIGN_STYLE,
+        "design_mode": mode,
+        "content_version": 0,
         "skill_applied": "interactive-slide-designer",
         "created_at": now_utc.isoformat(),
         "updated_at": now_utc.isoformat(),
@@ -1272,8 +1754,10 @@ def _create_proposal_website_impl(
     doc_ref = fs_client.collection(collection_name).document(presentation_id)
 
     # --- Fast path: a complete, schema-valid deck was supplied -> render & publish synchronously (no LLM work)
-    if deck_obj is not None:
+    if deck_obj is not None and mode == "template":
         deck_obj.theme_color = theme
+        if requested_style:
+            deck_obj.design_style = requested_style
         html_content = render_deck_html(
             deck_obj, generated_date=now_jst.strftime("%Y-%m-%d %H:%M JST")
         )
@@ -1292,6 +1776,9 @@ def _create_proposal_website_impl(
                 "proposal_title": deck_obj.proposal_title,
                 "subtitle": deck_obj.subtitle,
                 "deck_spec": deck_obj.model_dump(),
+                "design_style": deck_obj.design_style,
+                "content_version": 1,
+                "render_mode": "template",
                 "generation_status": "ready",
                 "generation_phase": "ready",
                 "generation_engine": "state_deck_spec",
@@ -1306,6 +1793,8 @@ def _create_proposal_website_impl(
             "client_name": deck_obj.client_name,
             "proposal_title": deck_obj.proposal_title,
             "theme_color": deck_obj.theme_color,
+            "design_style": deck_obj.design_style,
+            "design_mode": "template",
             "generation_engine": "state_deck_spec",
             "generation_engine_label": describe_generation_engine("state_deck_spec"),
             "skill_applied": "interactive-slide-designer",
@@ -1335,7 +1824,10 @@ def _create_proposal_website_impl(
                 "proposal_title": eff_title,
                 "proposal_brief": eff_brief,
                 "theme_color": theme,
+                "design_style": requested_style or DEFAULT_DESIGN_STYLE,
                 "outline_hint": outline_hint,
+                "design_mode": mode,
+                "design_request": design_request_text,
                 "expiration_days": exp_days,
             },
         }
@@ -1371,13 +1863,14 @@ def _create_proposal_website_impl(
         "client_name": eff_client,
         "proposal_title": eff_title,
         "theme_color": theme,
+        "design_style": requested_style or DEFAULT_DESIGN_STYLE,
+        "design_mode": mode,
         "generation_engine": generation_engine,
         "generation_engine_label": describe_generation_engine(generation_engine)
         if generation_engine
-        else "生成中（Managed Agents API → 時間予算超過時は gemini-3.8-flash へ自動切替）",
+        else f"生成中（{_get_model_name()} によるテンプレート高速生成）",
         "generation_plan": (
-            f"1) Managed Agents API ({MANAGED_AGENT_MODEL}) 最大約{_get_managed_agent_deadline_seconds() // 60}分 → "
-            f"2) {_get_model_name()} 高速生成 → 3) テンプレート即時生成（必ず完成させます）"
+            f"1) {_get_model_name()} によるテンプレート高速生成 → 2) 応答がない場合はテンプレート即時生成（必ず完成させます）"
         ),
         "estimated_completion": "通常1〜5分（最長でも約10分で自動完成）",
         "skill_applied": "interactive-slide-designer",
@@ -1393,6 +1886,27 @@ def _create_proposal_website_impl(
             "進捗を聞かれたら get_proposal_status を呼び出してください。"
         ),
     }
+    if mode == "freeform":
+        result.update(
+            {
+                "generation_plan": (
+                    "1) ADK のデザイナーエージェントが、枚数・レイアウト・図解・グラフ・"
+                    "必要に応じて AI 生成イメージまで自由に制作 → 2) ヘッドレス Chromium で描画し、スクリーンショットを同じ"
+                    "エージェントに見せて最大 2 回修正 → 3) 検証を通過した版を公開（通過しない場合はテンプレートで必ず仕上げます）"
+                ),
+                "estimated_completion": FREEFORM_CREATE_ETA,
+            }
+        )
+        if status_value == "GENERATING":
+            result["generation_engine_label"] = (
+                "生成中（ADK のデザイナーエージェントによる自由デザイン → 描画結果をエージェント自身が確認して修正 → 検証して公開）"
+            )
+            result["next_action"] = (
+                "URL・閲覧用ID・パスワード・有効期限を今すぐユーザーに提示し、『自由デザインで生成中です。URL を開くと生成中画面が"
+                "表示され、完成すると自動で切り替わります（通常 7〜11 分、最長約 20 分）。公開前にエージェントが描画結果を見て"
+                "見直します』と案内してください。"
+                "進捗を聞かれたら get_proposal_status を呼び出してください。"
+            )
     if tool_context is not None:
         tool_context.state["published_result"] = result
         tool_context.state["published_presentation"] = result
@@ -1403,6 +1917,7 @@ def publish_presentation(
     tool_context: ToolContext | None = None,
     deck_spec_json: str = "",
 ) -> dict[str, Any]:
+    """Backwards-compatible wrapper that publishes a presentation from tool_context.state['deck_spec'] or deck_spec_json."""
     return create_proposal_website(
         deck_spec_json=deck_spec_json,
         tool_context=tool_context,
@@ -1418,19 +1933,24 @@ def get_proposal_status(
     presentation_id: str,
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
-    """Reports the generation status / engine of a proposal website (and self-heals stale generations).
+    """Reports the generation / edit status of a proposal website (and self-heals stale runs).
 
-    Use when the user asks '生成状況を教えて', 'まだ完成しない？', or 'どのエンジンで生成された？'.
-    If a background generation has been running longer than the time budget, this tool completes it
-    immediately with the skill template so the share URL always ends up with a finished deck.
+    Use when the user asks '生成状況を教えて', 'まだ完成しない？', '修正は反映された？' or 'どのエンジンで生成された？'.
+    If a background generation has been running longer than its time budget, this tool completes it immediately
+    with the skill template so the share URL always ends up with a finished deck.
 
     Args:
         presentation_id: Target presentation ID (e.g., 'prop-20261003-xxxxxxxx').
         tool_context: Optional ADK ToolContext.
 
     Returns:
-        Dictionary with `generation_status` ('generating' | 'ready' | 'failed'), `generation_phase`,
-        `generation_engine`, `generation_engine_label`, `elapsed_seconds`, `share_url`, and `viewer_id`.
+        Dictionary with `generation_status` ('generating' | 'updating' | 'ready' | 'failed'), `generation_phase`,
+        `generation_phase_label`, `design_mode` ('freeform' | 'template'), `render_mode` (what the URL serves now),
+        `freeform_version`, `review_rounds` (how many times the designer agent looked at its rendered screenshots
+        before publication), `freeform_warnings`, `freeform_fallback_reason` (non-empty = free-form could not be
+        published and the template finished the deck), `content_version`, `last_edit_result` (truthful result of the
+        most recent edit), `generation_engine_label`, `elapsed_seconds`, `estimated_completion`,
+        `share_url`, and `viewer_id`.
     """
     try:
         project_id = _get_project_id()
@@ -1463,7 +1983,7 @@ def get_proposal_status(
             elapsed_seconds = None
 
         repaired = False
-        stale_after = _get_generation_stale_minutes() * 60
+        stale_after = _get_generation_stale_minutes(data) * 60
         if gen_status == "generating" and elapsed_seconds is not None and elapsed_seconds > stale_after:
             from app.generation_worker import finalize_with_fallback
 
@@ -1474,19 +1994,97 @@ def get_proposal_status(
             gen_status = str(data.get("generation_status") or "ready")
             repaired = True
 
+        edit_repaired = False
+        if gen_status == "updating" and _is_edit_stale(data):
+            repaired_at = now_utc.isoformat()
+            stale_updates = {
+                "generation_status": "ready",
+                "generation_phase": "ready",
+                "generation_detail": "",
+                "last_edit_result": {
+                    "status": "failed",
+                    "edit_engine": "",
+                    "edit_engine_label": "",
+                    "verified_changes": [],
+                    "unsupported_requests": [],
+                    "error": "修正処理が時間内に完了しなかったため中断しました（修正前の版を表示中）",
+                    "content_version": _content_version_of(data),
+                    "applied_at": repaired_at,
+                },
+                "edit_request": None,
+                "updated_at": repaired_at,
+            }
+            doc_ref.update(stale_updates)
+            data.update(stale_updates)
+            gen_status = "ready"
+            edit_repaired = True
+
         engine = str(data.get("generation_engine") or "")
         phase = str(data.get("generation_phase") or gen_status)
+        content_version = _content_version_of(data)
+        last_edit = data.get("last_edit_result") if isinstance(data.get("last_edit_result"), dict) else {}
+        last_edit_status = str(last_edit.get("status") or "")
+        design_mode = _doc_design_mode(data)
+        freeform_now = _is_freeform_rendered(data)
+        render_mode = "freeform" if freeform_now else ("template" if gen_status in ("ready", "updating") else "")
+        ff_meta = data.get("freeform") if isinstance(data.get("freeform"), dict) else {}
+        review_rounds = ff_meta.get("review_rounds") if isinstance(ff_meta.get("review_rounds"), list) else []
+        freeform_version = int(ff_meta.get("current_version") or 0) if freeform_now else 0
+        fallback_reason = str(data.get("freeform_fallback_reason") or "")
+        freeform_edit_running = gen_status == "updating" and _is_freeform_edit(data)
         if gen_status == "ready":
-            message = f"生成は完了しています（{describe_generation_engine(engine)}）。共有URLを開くと提案ページが表示されます。"
+            if freeform_now:
+                message = f"自由デザイン版（v{freeform_version}）を公開しています（{describe_generation_engine(engine)}）。"
+                if review_rounds:
+                    message += f" 公開前にエージェントが描画結果を見て {len(review_rounds)} 回見直しました。"
+            else:
+                message = f"生成は完了しています（{describe_generation_engine(engine)}）。共有URLを開くと提案ページが表示されます。"
+            if last_edit_status == "applied":
+                if freeform_now:
+                    message += " 直近の修正は反映済みです。"
+                else:
+                    message += f" 直近の修正は反映済みです（版 v{content_version}）。"
+            elif last_edit_status == "failed":
+                message += " 直近の修正は反映できなかったため、修正前の版を表示しています。"
+            elif last_edit_status == "no_change":
+                message += " 直近の修正依頼では、反映できる変更点がありませんでした。"
+        elif gen_status == "updating":
+            edit_elapsed = _seconds_since(data.get("edit_requested_at"))
+            if freeform_edit_running:
+                message = (
+                    f"自由デザインの修正を反映中です（フェーズ: {_phase_label(phase)}、経過 {int(edit_elapsed or 0)} 秒、"
+                    f"{FREEFORM_EDIT_ETA}）。共有URLでは修正前の版に『更新中』バナーが表示され、完了すると自動で最新版に切り替わります。"
+                )
+            else:
+                message = (
+                    f"修正を反映中です（フェーズ: {_phase_label(phase)}、経過 {int(edit_elapsed or 0)} 秒）。"
+                    "共有URLを開いている画面には『更新中』バナーが表示され、完了すると自動で最新版に切り替わります。"
+                )
         elif gen_status == "generating":
-            message = (
-                f"現在生成中です（フェーズ: {phase}、経過 {int(elapsed_seconds or 0)} 秒）。"
-                "共有URLでは生成中画面が表示され、完成すると自動的に提案ページへ切り替わります。"
-            )
+            if design_mode == "freeform":
+                message = (
+                    f"自由デザインで生成中です（フェーズ: {_phase_label(phase)}、経過 {int(elapsed_seconds or 0)} 秒、"
+                    f"{FREEFORM_CREATE_ETA}）。共有URLでは生成中画面が表示され、完成すると自動的に提案ページへ切り替わります。"
+                )
+            else:
+                message = (
+                    f"現在生成中です（フェーズ: {_phase_label(phase)}、経過 {int(elapsed_seconds or 0)} 秒）。"
+                    "共有URLでは生成中画面が表示され、完成すると自動的に提案ページへ切り替わります。"
+                )
         elif gen_status == "failed":
             message = f"生成に失敗しました: {str(data.get('generation_error') or '')[:200]}"
         else:
             message = "生成状況を判定できませんでした。"
+        if gen_status == "ready" and not freeform_now and fallback_reason:
+            message += " 自由デザイン版は公開できなかったため、テンプレートで仕上げています。"
+        if gen_status == "generating" and design_mode == "freeform":
+            estimated = FREEFORM_CREATE_ETA
+        elif freeform_edit_running:
+            estimated = FREEFORM_EDIT_ETA
+        else:
+            estimated = ""
+        deck_spec_data = data.get("deck_spec") if isinstance(data.get("deck_spec"), dict) else {}
+        versions = data.get("freeform_versions") if isinstance(data.get("freeform_versions"), list) else []
         result = {
             "status": "STATUS",
             "presentation_id": presentation_id,
@@ -1494,17 +2092,45 @@ def get_proposal_status(
             "proposal_title": data.get("proposal_title", ""),
             "generation_status": gen_status,
             "generation_phase": phase,
+            "generation_phase_label": _phase_label(phase),
             "generation_detail": data.get("generation_detail", ""),
             "generation_engine": engine,
             "generation_engine_label": describe_generation_engine(engine) if engine else "",
             "generation_dispatch": data.get("generation_dispatch", ""),
             "elapsed_seconds": elapsed_seconds,
+            "estimated_completion": estimated,
             "stale_repair_applied": repaired,
+            "edit_stale_repair_applied": edit_repaired,
             "ready_at": data.get("ready_at", ""),
             "share_url": f"{hosting_base_url}/p/{presentation_id}",
             "viewer_id": data.get("viewer_id", ""),
             "expires_at": data.get("expires_at", ""),
             "is_active": bool(data.get("is_active", True)),
+            "design_mode": design_mode,
+            "render_mode": render_mode,
+            "design_style": data.get("design_style") or deck_spec_data.get("design_style") or DEFAULT_DESIGN_STYLE,
+            "content_version": content_version,
+            "freeform_version": freeform_version or None,
+            "available_freeform_versions": [
+                int(v.get("version") or 0) for v in versions if isinstance(v, dict)
+            ],
+            "slide_count": data.get("slide_count") if freeform_now else None,
+            "review_rounds": len(review_rounds) if freeform_now else 0,
+            "review_round_details": [
+                {
+                    "round": r.get("round"),
+                    "review_status": r.get("review_status"),
+                    "files_changed": r.get("files_changed"),
+                    "screenshots_sent": r.get("screenshots_sent"),
+                }
+                for r in review_rounds
+                if isinstance(r, dict)
+            ]
+            if freeform_now
+            else [],
+            "freeform_warnings": [str(w)[:200] for w in (ff_meta.get("warnings") or [])][:6] if freeform_now else [],
+            "freeform_fallback_reason": fallback_reason[:300],
+            "last_edit_result": _public_last_edit(last_edit),
             "user_message": message,
         }
         if tool_context is not None:
@@ -1521,29 +2147,53 @@ def get_proposal_status(
 
 def edit_proposal_website(
     presentation_id: str,
-    edit_instructions: str,
+    edit_instructions: str = "",
     new_title: str = "",
     new_subtitle: str = "",
     new_theme_color: str = "",
     new_custom_callout: str = "",
+    new_design_style: str = "",
+    undo_last_edit: bool = False,
+    convert_to_freeform: bool = False,
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
-    """Edits an existing published proposal website and updates the live HTML in Private Cloud Storage.
+    """Edits a published proposal website in place (same URL) and reports only the changes that were actually applied.
 
-    If the deck is still being generated in the background, returns `status='GENERATING'` instead of editing.
+    Template decks (fast mode, fixed 6 slides): the edit runs synchronously (typically 15-60 seconds) and supports
+    slide text edits, the accent colour (`theme_color`) and the overall look (`design_style`): 'immersive-dark'
+    (dark navy, default), 'clean-light' (white background, minimal) and 'editorial-light' (off-white, serif headings).
+    Slides cannot be added or removed and graphs/images cannot be added in the template.
+
+    Free-form decks (`render_mode` 'freeform'): any change is possible (layout, colours, slides, graphs, diagrams,
+    images). The request is queued and applied in the background by the ADK designer agent, which
+    checks the rendered screenshots before publication (typically 5-7 minutes). The tool returns 'EDIT_QUEUED';
+    the old version stays visible with an "更新中" banner and switches automatically when the new one is published.
+
+    Set `convert_to_freeform=True` (after the user agrees) to rebuild a template deck as a free-form deck when the
+    request cannot be expressed by the template (adding slides, graphs or images, a completely different layout).
+    It typically takes 7-10 minutes and keeps the same URL.
 
     Args:
         presentation_id: ID of the existing presentation (e.g., 'prop-20261003-xxxxxxxx').
-        edit_instructions: Natural-language description of changes to apply to the slides.
+        edit_instructions: The user's change request in natural language (pass it verbatim).
         new_title: Optional explicit replacement for the proposal title.
         new_subtitle: Optional explicit replacement for the proposal subtitle.
         new_theme_color: Optional new accent color ('sky', 'emerald', 'violet', 'amber', 'rose').
         new_custom_callout: Optional callout badge text to display on the cover slide.
+        new_design_style: Optional overall look ('immersive-dark', 'clean-light', 'editorial-light'),
+            e.g. 'clean-light' for "背景を白に".
+        undo_last_edit: If True, restores the version before the most recent edit (「元に戻して」). For free-form decks
+            this switches back to the previous version instantly.
+        convert_to_freeform: If True, rebuilds a template deck as a free-form deck (same URL).
         tool_context: Optional ADK ToolContext.
 
     Returns:
-        Dictionary containing `status` ('UPDATED', 'GENERATING', 'NOT_FOUND' or 'ERROR'), `presentation_id`,
-        `share_url`, `updated_fields`, and `slide_outline`.
+        Dictionary with `status`: 'UPDATED' (changes applied - report ONLY `verified_changes`), 'EDIT_QUEUED'
+        (free-form edit accepted and running in the background - NOT finished yet), 'NO_CHANGE' (nothing could be
+        applied - the deck is unchanged), 'BUSY' (another edit is still being applied), 'GENERATING' (deck not
+        generated yet), 'EDIT_FAILED' / 'ERROR' (previous version kept) or 'NOT_FOUND'; plus `share_url`,
+        `verified_changes`, `unsupported_requests`, `designer_notes`, `render_mode`, `content_version`,
+        `estimated_completion`, `user_message` and `next_action`.
     """
     try:
         return _edit_proposal_website_impl(
@@ -1553,200 +2203,818 @@ def edit_proposal_website(
             new_subtitle=new_subtitle,
             new_theme_color=new_theme_color,
             new_custom_callout=new_custom_callout,
+            new_design_style=new_design_style,
+            undo_last_edit=undo_last_edit,
+            convert_to_freeform=convert_to_freeform,
             tool_context=tool_context,
         )
     except Exception as exc:  # noqa: BLE001
         return _tool_error(exc, "edit_proposal_website", presentation_id=presentation_id)
 
 
+def _apply_presentation_edit(
+    *,
+    presentation_id: str,
+    doc_data: dict[str, Any],
+    current_deck: PresentationDeckSpec,
+    instructions: str,
+    explicit: dict[str, str],
+    rejected: list[str],
+    undo_last_edit: bool,
+    bucket_name: str,
+    blob_path: str,
+    old_version: int,
+    set_phase: Callable[[str, str], None],
+) -> dict[str, Any]:
+    """Computes the edited deck, and (only if something visibly changed) backs up + republishes the HTML."""
+    from google.cloud import storage
+
+    storage_client = storage.Client(project=_get_project_id())
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_path)
+    existing_html = ""
+    try:
+        if hasattr(blob, "download_as_text"):
+            existing_html = blob.download_as_text(encoding="utf-8")
+        else:
+            existing_html = blob.download_as_bytes().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Existing HTML for %s unavailable (%s); editing from deck_spec", presentation_id, exc)
+
+    designer_notes: list[str] = []
+    unsupported: list[str] = list(rejected)
+    adjustments: list[str] = []
+    base = {
+        "existing_html_loaded": bool(existing_html),
+        "version_blob": "",
+    }
+    if undo_last_edit:
+        previous = doc_data.get("previous_deck_spec")
+        if not previous:
+            unsupported.append("元に戻せる直前の版がありません（まだ修正していないか、取り消し済みです）")
+            return {
+                **base,
+                "kind": "no_change",
+                "engine": "undo",
+                "new_deck": current_deck,
+                "verified_changes": [],
+                "changed_fields": [],
+                "designer_notes": [],
+                "unsupported": unsupported,
+                "adjustments": [],
+            }
+        new_deck = PresentationDeckSpec.model_validate(previous)
+        engine = "undo"
+        designer_notes = ["直前の修正を取り消し、1つ前の版に戻しました"]
+    else:
+        new_deck = current_deck.model_copy(deep=True)
+        engine = "heuristic" if instructions else "explicit"
+        llm_used = False
+        if instructions and _llm_edit_enabled():
+            set_phase("edit_designing", _get_model_name())
+            try:
+                edit_result, used = _edit_deck_with_gemini(current_deck, instructions, explicit)
+                new_deck = edit_result.deck_spec
+                designer_notes = [str(note)[:200] for note in edit_result.change_summary[:8]]
+                unsupported.extend(str(item)[:200] for item in edit_result.unsupported_requests[:5])
+                engine = f"gemini:{used}"
+                llm_used = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("LLM deck edit unavailable for %s; using keyword heuristics: %s", presentation_id, exc)
+                engine = "heuristic:llm_unavailable"
+        new_deck, adjustments = _apply_edit_heuristics(current_deck, new_deck, instructions, llm_used)
+        for field_name, value in explicit.items():
+            setattr(new_deck, field_name, value)
+    _normalize_deck_in_place(new_deck)
+    new_deck.client_slug = current_deck.client_slug
+
+    changed_fields, verified_changes = describe_deck_changes(current_deck, new_deck)
+    if not changed_fields:
+        if instructions and not unsupported:
+            unsupported.append(
+                f"指示「{_clip(instructions, 60)}」から、テンプレートで反映できる具体的な変更点を特定できませんでした"
+            )
+        return {
+            **base,
+            "kind": "no_change",
+            "engine": engine,
+            "new_deck": current_deck,
+            "verified_changes": [],
+            "changed_fields": [],
+            "designer_notes": [],
+            "unsupported": unsupported,
+            "adjustments": adjustments,
+        }
+
+    set_phase("edit_rendering", f"{len(changed_fields)} fields")
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_jst = now_utc.astimezone(datetime.timezone(datetime.timedelta(hours=9)))
+    html_content = render_deck_html(
+        new_deck, generated_date=now_jst.strftime("%Y-%m-%d %H:%M JST (Updated)")
+    )
+
+    set_phase("edit_publishing", "")
+    version_blob = ""
+    if existing_html:
+        version_blob = (
+            f"presentations/{presentation_id}/versions/{now_utc.strftime('%Y%m%dT%H%M%SZ')}-v{old_version}.html"
+        )
+        try:
+            backup = bucket.blob(version_blob)
+            backup.cache_control = "no-store, private"
+            backup.upload_from_string(
+                existing_html.encode("utf-8"), content_type="text/html; charset=utf-8"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Version backup for %s failed (continuing): %s", presentation_id, exc)
+            version_blob = ""
+    blob.cache_control = "no-store, private"
+    blob.upload_from_string(html_content.encode("utf-8"), content_type="text/html; charset=utf-8")
+    return {
+        **base,
+        "kind": "applied",
+        "engine": engine,
+        "new_deck": new_deck,
+        "verified_changes": verified_changes,
+        "changed_fields": changed_fields,
+        "designer_notes": designer_notes,
+        "unsupported": unsupported,
+        "adjustments": adjustments,
+        "version_blob": version_blob,
+    }
+
+
 def _edit_proposal_website_impl(
     presentation_id: str,
-    edit_instructions: str,
+    edit_instructions: str = "",
     new_title: str = "",
     new_subtitle: str = "",
     new_theme_color: str = "",
     new_custom_callout: str = "",
+    new_design_style: str = "",
+    undo_last_edit: bool = False,
+    convert_to_freeform: bool = False,
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
-    """Edits an existing published proposal website and updates the live HTML in Private Cloud Storage.
-
-    Args:
-        presentation_id: ID of the existing presentation (e.g., 'prop-20261003-xxxxxxxx').
-        edit_instructions: Natural-language description of changes to apply to the slides.
-        new_title: Optional explicit replacement for the proposal title.
-        new_subtitle: Optional explicit replacement for the proposal subtitle.
-        new_theme_color: Optional new accent color ('sky', 'emerald', 'violet', 'amber', 'rose').
-        new_custom_callout: Optional callout badge text to display on the cover slide.
-        tool_context: Optional ADK ToolContext.
-
-    Returns:
-        Dictionary containing `status='UPDATED'`, `presentation_id`, `share_url`, `updated_fields`, and `slide_outline`.
-    """
+    started = time.monotonic()
     project_id = _get_project_id()
-    location = _get_location()
     collection_name = _get_firestore_collection()
-    hosting_base_url = _get_hosting_base_url()
-
-    from google.cloud import firestore, storage
+    share_url = f"{_get_hosting_base_url()}/p/{presentation_id}"
 
     fs_client = _get_firestore_client(project_id)
     doc_ref = fs_client.collection(collection_name).document(presentation_id)
     doc_snap = doc_ref.get()
     if not doc_snap.exists:
         raise ValueError(f"Presentation '{presentation_id}' not found in Firestore.")
-
     doc_data = doc_snap.to_dict() or {}
-    if str(doc_data.get("generation_status") or "").lower() == "generating":
+
+    gen_status = str(doc_data.get("generation_status") or "").lower()
+    if gen_status == "generating":
         return {
             "status": "GENERATING",
             "presentation_id": presentation_id,
             "generation_phase": doc_data.get("generation_phase", ""),
-            "share_url": f"{hosting_base_url}/p/{presentation_id}",
+            "share_url": share_url,
             "user_message": (
                 "このプレゼンテーションはまだ生成中のため、まだ修正できません。"
                 "完成後（共有URLが提案ページに切り替わった後）に再度ご指示ください。"
             ),
         }
-    bucket_name = doc_data.get("gcs_bucket") or _get_bucket_name()
-    blob_path = (
-        doc_data.get("gcs_blob_path") or f"presentations/{presentation_id}/index.html"
-    )
-    storage_client = storage.Client(project=project_id)
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(blob_path)
+    if gen_status == "updating" and not _is_edit_stale(doc_data):
+        return {
+            "status": "BUSY",
+            "presentation_id": presentation_id,
+            "generation_phase": doc_data.get("generation_phase", ""),
+            "share_url": share_url,
+            "user_message": (
+                f"前回の修正（自由デザイン）を反映中です（{FREEFORM_EDIT_ETA}）。完了後に改めてご指示ください。"
+                if _is_freeform_edit(doc_data)
+                else "前回の修正を反映中です（通常1分以内に完了します）。完了後に改めてご指示ください。"
+            ),
+            "next_action": "前の修正の反映中であることを伝え、少し待ってから再度依頼いただくよう案内してください。",
+        }
 
-    existing_html = ""
-    try:
-        if hasattr(blob, "download_as_text"):
-            existing_html = blob.download_as_text(encoding="utf-8")
-        elif hasattr(blob, "download_as_bytes"):
-            existing_html = blob.download_as_bytes().decode("utf-8", errors="replace")
-    except Exception as exc:
-        logger.info("Existing HTML blob read skipped or unavailable: %s", exc)
+    if _is_freeform_rendered(doc_data) or (convert_to_freeform and not undo_last_edit):
+        raw_explicit = {
+            key: str(value).strip()[:300]
+            for key, value in (
+                ("proposal_title", new_title),
+                ("subtitle", new_subtitle),
+                ("theme_color", new_theme_color),
+                ("custom_callout", new_custom_callout),
+                ("design_style", new_design_style),
+            )
+            if str(value or "").strip()
+        }
+        return _freeform_edit_entry(
+            presentation_id=presentation_id,
+            doc_ref=doc_ref,
+            doc_data=doc_data,
+            share_url=share_url,
+            instructions=(edit_instructions or "").strip(),
+            explicit=raw_explicit,
+            undo_last_edit=bool(undo_last_edit),
+            convert=not _is_freeform_rendered(doc_data),
+            started=started,
+            tool_context=tool_context,
+        )
+
+    instructions = (edit_instructions or "").strip()
+    explicit: dict[str, str] = {}
+    rejected: list[str] = []
+    if (new_title or "").strip():
+        explicit["proposal_title"] = new_title.strip()
+    if (new_subtitle or "").strip():
+        explicit["subtitle"] = new_subtitle.strip()
+    theme_req = (new_theme_color or "").strip().lower()
+    if theme_req:
+        if theme_req in SUPPORTED_THEME_COLORS:
+            explicit["theme_color"] = theme_req
+        else:
+            rejected.append(
+                f"アクセントカラー「{new_theme_color}」は未対応です（sky / emerald / violet / amber / rose から選べます）"
+            )
+    if (new_custom_callout or "").strip():
+        explicit["custom_callout"] = new_custom_callout.strip()[:120]
+    if (new_design_style or "").strip():
+        style_req = normalize_design_style(new_design_style, default="")
+        if style_req:
+            explicit["design_style"] = style_req
+        else:
+            rejected.append(
+                f"デザインスタイル「{new_design_style}」は未対応です（immersive-dark / clean-light / editorial-light から選べます）"
+            )
+    if not instructions and not explicit and not undo_last_edit and rejected:
+        return {
+            "status": "NO_CHANGE",
+            "presentation_id": presentation_id,
+            "share_url": share_url,
+            "verified_changes": [],
+            "changed_fields": [],
+            "updated_fields": [],
+            "designer_notes": [],
+            "unsupported_requests": rejected,
+            "content_version": _content_version_of(doc_data),
+            "design_style": normalize_design_style(doc_data.get("design_style")),
+            "theme_color": doc_data.get("theme_color", ""),
+            "user_message": "指定された値はテンプレートで未対応のため、プレゼンテーションは変更していません。",
+            "next_action": "変更していないことと unsupported_requests の理由を伝え、対応している選択肢から選んでもらってください。",
+        }
+    if not instructions and not explicit and not undo_last_edit:
+        return {
+            "status": "ERROR",
+            "action": "edit_proposal_website",
+            "error_type": "MissingInput",
+            "presentation_id": presentation_id,
+            "share_url": share_url,
+            "unsupported_requests": rejected,
+            "user_message": "修正内容（自然文の指示、または新しいタイトル・アクセントカラー・デザインスタイル等）を指定してください。",
+            "next_action": "ユーザーに具体的な修正内容を確認してから再度呼び出してください。",
+        }
 
     raw_spec = doc_data.get("deck_spec")
     if raw_spec:
-        deck_obj = PresentationDeckSpec.model_validate(raw_spec)
+        current_deck = PresentationDeckSpec.model_validate(raw_spec)
     else:
-        deck_obj = _default_deck_spec_from_brief(
-            client_name=doc_data.get("client_name", "Sample Client Inc."),
+        current_deck = _default_deck_spec_from_brief(
+            client_name=doc_data.get("client_name", "Client"),
             proposal_title=doc_data.get("proposal_title", "Proposal"),
             proposal_brief=doc_data.get("subtitle", ""),
             theme_color=doc_data.get("theme_color", "sky"),
         )
+        current_deck.design_style = normalize_design_style(doc_data.get("design_style"))
+    _normalize_deck_in_place(current_deck)
+    old_version = _content_version_of(doc_data)
+    bucket_name = str(doc_data.get("gcs_bucket") or _get_bucket_name())
+    blob_path = str(doc_data.get("gcs_blob_path") or f"presentations/{presentation_id}/index.html")
 
-    updated_fields: list[str] = []
+    # 1) Mark the deck as "updating" so every open viewer immediately sees the 更新中 banner.
+    request_id = uuid.uuid4().hex[:12]
+    requested_at = _utc_now_iso()
+    doc_ref.update(
+        {
+            "generation_status": "updating",
+            "generation_phase": "edit_queued",
+            "generation_detail": "",
+            "edit_request": {
+                "request_id": request_id,
+                "instructions": instructions[:2000],
+                "explicit_changes": dict(explicit),
+                "undo": bool(undo_last_edit),
+                "requested_at": requested_at,
+            },
+            "edit_requested_at": requested_at,
+            "updated_at": requested_at,
+        }
+    )
 
-    if edit_instructions and os.environ.get(
-        "ENABLE_LLM_DECK_EDIT", "true"
-    ).lower() in ("true", "1"):
-        active_model = _get_model_name()
-        genai_location = _get_genai_location(active_model)
-        candidate_locations = [genai_location]
-        if genai_location != "global":
-            candidate_locations.append("global")
-        html_excerpt = existing_html[:1500] if existing_html else "(Not cached)"
-        edit_prompt = f"""既存の6枚構成プレゼンテーションデータ（JSON）およびCloud Storage上の現行HTMLに対して、ユーザーの修正指示を反映した新しい `PresentationDeckSpec` JSONを出力してください。
-変更指示がないフィールドは既存の値を維持してください。
+    def set_phase(phase: str, detail: str = "") -> None:
+        try:
+            doc_ref.update(
+                {"generation_phase": phase, "generation_detail": detail[:300], "updated_at": _utc_now_iso()}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info("edit progress update skipped: %s", exc)
 
-【Cloud Storage上の現行HTML抜粋 ({blob_path})】:
-{html_excerpt}
+    # 2) Apply the edit; on ANY failure revert to the previous (still published) version.
+    try:
+        outcome = _apply_presentation_edit(
+            presentation_id=presentation_id,
+            doc_data=doc_data,
+            current_deck=current_deck,
+            instructions=instructions,
+            explicit=explicit,
+            rejected=rejected,
+            undo_last_edit=bool(undo_last_edit),
+            bucket_name=bucket_name,
+            blob_path=blob_path,
+            old_version=old_version,
+            set_phase=set_phase,
+        )
+        new_deck: PresentationDeckSpec = outcome["new_deck"]
+        engine = str(outcome["engine"])
+        applied = outcome["kind"] == "applied"
+        new_version = old_version + 1 if applied else old_version
+        finished_at = _utc_now_iso()
+        last_edit_result = {
+            "status": "applied" if applied else "no_change",
+            "request_id": request_id,
+            "edit_engine": engine,
+            "edit_engine_label": describe_edit_engine(engine),
+            "verified_changes": outcome["verified_changes"],
+            "changed_fields": outcome["changed_fields"],
+            "designer_notes": outcome["designer_notes"],
+            "unsupported_requests": outcome["unsupported"],
+            "heuristic_adjustments": outcome["adjustments"],
+            "previous_version_blob": outcome["version_blob"],
+            "content_version": new_version,
+            "design_style": new_deck.design_style,
+            "elapsed_seconds": round(time.monotonic() - started, 1),
+            "applied_at": finished_at,
+        }
+        updates: dict[str, Any] = {
+            "generation_status": "ready",
+            "generation_phase": "ready",
+            "generation_detail": "",
+            "last_edit_result": last_edit_result,
+            "last_edit_instructions": instructions[:2000],
+            "edit_request": None,
+            "updated_at": finished_at,
+        }
+        if applied:
+            updates.update(
+                {
+                    "client_name": new_deck.client_name,
+                    "proposal_title": new_deck.proposal_title,
+                    "subtitle": new_deck.subtitle,
+                    "theme_color": new_deck.theme_color,
+                    "design_style": new_deck.design_style,
+                    "deck_spec": new_deck.model_dump(),
+                    "previous_deck_spec": current_deck.model_dump(),
+                    "content_version": new_version,
+                    "last_edited_at": finished_at,
+                }
+            )
+        doc_ref.update(updates)
+    except Exception as exc:  # noqa: BLE001
+        failed_at = _utc_now_iso()
+        try:
+            doc_ref.update(
+                {
+                    "generation_status": "ready",
+                    "generation_phase": "ready",
+                    "generation_detail": "",
+                    "last_edit_result": {
+                        "status": "failed",
+                        "request_id": request_id,
+                        "edit_engine": "",
+                        "edit_engine_label": "",
+                        "verified_changes": [],
+                        "unsupported_requests": rejected,
+                        "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                        "content_version": old_version,
+                        "applied_at": failed_at,
+                    },
+                    "edit_request": None,
+                    "updated_at": failed_at,
+                }
+            )
+        except Exception as revert_exc:  # noqa: BLE001
+            logger.warning("Could not revert %s to ready after edit failure: %s", presentation_id, revert_exc)
+        payload = _tool_error(exc, "edit_proposal_website", presentation_id=presentation_id, share_url=share_url)
+        payload["status"] = "EDIT_FAILED"
+        payload["verified_changes"] = []
+        payload["user_message"] = (
+            "修正の反映中にエラーが発生したため、プレゼンテーションは修正前の版のままです。時間をおいて再度お試しください。"
+        )
+        payload["next_action"] = "修正が反映されなかったことと、修正前の版が引き続き表示されていることを正直に伝えてください。"
+        return payload
 
-【現在のPresentationDeckSpec JSON】:
-{json.dumps(deck_obj.model_dump(), ensure_ascii=False, indent=2)}
-
-【ユーザーの修正指示】:
-{edit_instructions}
-"""
-        for loc in candidate_locations:
-            try:
-                client = genai.Client(
-                    vertexai=True,
-                    project=project_id,
-                    location=loc,
-                )
-                resp = client.models.generate_content(
-                    model=active_model,
-                    contents=edit_prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=PresentationDeckSpec,
-                        temperature=0.2,
-                    ),
-                )
-                if resp.text:
-                    deck_obj = PresentationDeckSpec.model_validate_json(resp.text)
-                    updated_fields.append("llm_deck_refinement")
-                    break
-            except Exception as exc:
-                logger.info(
-                    "LLM edit (%s at %s) fallback to deterministic field updates: %s",
-                    active_model,
-                    loc,
-                    exc,
-                )
-
-    if new_title:
-        deck_obj.proposal_title = new_title
-        updated_fields.append("proposal_title")
-    if new_subtitle:
-        deck_obj.subtitle = new_subtitle
-        updated_fields.append("subtitle")
-    if new_theme_color and new_theme_color in SUPPORTED_THEME_COLORS:
-        deck_obj.theme_color = new_theme_color
-        updated_fields.append("theme_color")
+    if applied:
+        user_message = (
+            f"修正を反映しました（版 v{new_version}）。共有URLは変わらず、開いている画面も自動で最新版に切り替わります。"
+        )
+        next_action = (
+            "『反映した変更点』として verified_changes の項目だけを箇条書きで伝えてください。designer_notes は見た目の補足説明にのみ使い、"
+            "verified_changes にない変更を実施したと言わないでください。unsupported_requests があれば『反映できなかった点』として"
+            "正直に伝え、代替案を示してください。元に戻したい場合は「元に戻して」と言えば取り消せることも案内してください。"
+        )
     else:
-        for color_name in SUPPORTED_THEME_COLORS:
-            if color_name in edit_instructions.lower():
-                deck_obj.theme_color = color_name
-                updated_fields.append("theme_color")
-                break
-    if new_custom_callout:
-        deck_obj.custom_callout = new_custom_callout
-        updated_fields.append("custom_callout")
-    elif edit_instructions and not updated_fields:
-        deck_obj.custom_callout = edit_instructions[:60]
-        updated_fields.append("custom_callout")
-
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_jst = now_utc.astimezone(datetime.timezone(datetime.timedelta(hours=9)))
-    html_content = render_deck_html(
-        deck_obj,
-        generated_date=now_jst.strftime("%Y-%m-%d %H:%M JST (Updated)"),
-    )
-
-    blob.cache_control = "no-store, private"
-    blob.upload_from_string(
-        html_content.encode("utf-8"),
-        content_type="text/html; charset=utf-8",
-    )
-
-    updates = {
-        "client_name": deck_obj.client_name,
-        "proposal_title": deck_obj.proposal_title,
-        "subtitle": deck_obj.subtitle,
-        "theme_color": deck_obj.theme_color,
-        "deck_spec": deck_obj.model_dump(),
-        "updated_at": now_utc.isoformat(),
-        "last_edit_instructions": edit_instructions,
-    }
-    doc_ref.update(updates)
-
-    share_url = f"{hosting_base_url}/p/{presentation_id}"
+        user_message = "修正指示から反映できる変更点を特定できなかったため、プレゼンテーションは変更していません。"
+        next_action = (
+            "変更されていないことを正直に伝え、unsupported_requests の理由を説明したうえで、どのスライドのどの文言・"
+            "アクセントカラー・デザインスタイル（immersive-dark / clean-light / editorial-light）をどう変えたいかを具体的に聞き返してください。"
+        )
     result = {
+        "status": "UPDATED" if applied else "NO_CHANGE",
+        "presentation_id": presentation_id,
+        "share_url": share_url,
+        "client_name": new_deck.client_name,
+        "proposal_title": new_deck.proposal_title,
+        "subtitle": new_deck.subtitle,
+        "theme_color": new_deck.theme_color,
+        "design_style": new_deck.design_style,
+        "design_style_label": DESIGN_STYLE_LABELS.get(new_deck.design_style, new_deck.design_style),
+        "custom_callout": new_deck.custom_callout,
+        "verified_changes": outcome["verified_changes"],
+        "changed_fields": outcome["changed_fields"],
+        "updated_fields": outcome["changed_fields"],
+        "designer_notes": outcome["designer_notes"],
+        "unsupported_requests": outcome["unsupported"],
+        "edit_engine": engine,
+        "edit_engine_label": describe_edit_engine(engine),
+        "content_version": new_version,
+        "previous_version_saved": bool(outcome["version_blob"]),
+        "existing_html_loaded": outcome["existing_html_loaded"],
+        "elapsed_seconds": round(time.monotonic() - started, 1),
+        "updated_at": finished_at,
+        "slide_outline": _build_slide_outline(new_deck),
+        "user_message": user_message,
+        "next_action": next_action,
+    }
+    if tool_context is not None:
+        tool_context.state["last_edited_result"] = result
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Free-form edits: queued for the background job; undo is an instant pointer switch
+# ---------------------------------------------------------------------------
+_FREEFORM_EDIT_STATUS = {"applied": "UPDATED", "no_change": "NO_CHANGE", "failed": "EDIT_FAILED"}
+
+
+def _freeform_edit_messages(status: str, kind: str, freeform_version: Any, error: str) -> tuple[str, str]:
+    if status == "UPDATED":
+        if kind == "undo":
+            return (
+                "1つ前の版に戻しました。共有URLは変わらず、開いている画面も自動で切り替わります。",
+                "verified_changes の内容だけを伝えてください。",
+            )
+        return (
+            f"修正を反映しました（自由デザイン版 v{freeform_version}）。共有URLは変わらず、開いている画面も自動で最新版に切り替わります。",
+            "『反映した変更点』として verified_changes（公開前後のファイルを機械的に比べた結果）だけを箇条書きで伝えてください。"
+            "designer_notes はデザイナーエージェント自身の説明（自己申告）なので、そうと分かるように区別して添える程度にとどめ、"
+            "verified_changes にない変更を実施したと言わないでください。「元に戻して」で1つ前の版に戻せることも案内してください。",
+        )
+    if status == "NO_CHANGE":
+        return (
+            "反映できる変更がなかったため、プレゼンテーションは変更していません。",
+            "変更されていないことを正直に伝え、どこをどう変えたいかを具体的に聞き返してください。",
+        )
+    if status == "EDIT_FAILED":
+        return (
+            f"修正を反映できなかったため、修正前の版のままです（{error[:120]}）。",
+            "修正が反映されなかったことと、修正前の版が引き続き表示されていることを正直に伝えてください。",
+        )
+    return (
+        "修正を受け付けました。裏側でデザイナーエージェントが修正し、描画結果を確認してから公開します。",
+        "まだ完了していないことを伝え、完了したかは get_proposal_status で確認すると案内してください。",
+    )
+
+
+def _freeform_last_edit_payload(
+    presentation_id: str, share_url: str, data: dict[str, Any], request_id: str, started: float
+) -> dict[str, Any]:
+    """Maps the worker's `last_edit_result` (sync trigger mode) to the tool response."""
+    last = data.get("last_edit_result") if isinstance(data.get("last_edit_result"), dict) else {}
+    if request_id and str(last.get("request_id") or "") != request_id:
+        last = {}
+    status = _FREEFORM_EDIT_STATUS.get(str(last.get("status") or ""), "EDIT_QUEUED")
+    kind = str(last.get("kind") or "edit")
+    user_message, next_action = _freeform_edit_messages(
+        status, kind, last.get("freeform_version"), str(last.get("error") or "")
+    )
+    return {
+        "status": status,
+        "presentation_id": presentation_id,
+        "share_url": share_url,
+        "kind": kind,
+        "render_mode": "freeform" if _is_freeform_rendered(data) else str(data.get("render_mode") or "template"),
+        "verified_changes": list(last.get("verified_changes") or []),
+        "designer_notes": list(last.get("designer_notes") or []),
+        "unsupported_requests": list(last.get("unsupported_requests") or []),
+        "review_rounds": last.get("review_rounds", 0),
+        "freeform_version": last.get("freeform_version"),
+        "edit_engine": last.get("edit_engine", ""),
+        "edit_engine_label": last.get("edit_engine_label", ""),
+        "content_version": _content_version_of(data),
+        "error": str(last.get("error") or ""),
+        "elapsed_seconds": round(time.monotonic() - started, 1),
+        "user_message": user_message,
+        "next_action": next_action,
+    }
+
+
+def _queue_freeform_edit(
+    *,
+    presentation_id: str,
+    doc_ref: Any,
+    doc_data: dict[str, Any],
+    share_url: str,
+    instructions: str,
+    explicit: dict[str, str],
+    convert: bool,
+    started: float,
+) -> dict[str, Any]:
+    request_id = uuid.uuid4().hex[:12]
+    requested_at = _utc_now_iso()
+    kind = "convert" if convert else "edit"
+    doc_ref.update(
+        {
+            "generation_status": "updating",
+            "generation_phase": "freeform_edit_queued",
+            "generation_detail": "",
+            "edit_request": {
+                "request_id": request_id,
+                "instructions": instructions[:2000],
+                "explicit_changes": dict(explicit),
+                "undo": False,
+                "requested_at": requested_at,
+                "mode": "freeform",
+                "kind": kind,
+            },
+            "edit_requested_at": requested_at,
+            "updated_at": requested_at,
+        }
+    )
+    dispatch = _start_background_generation(presentation_id, job_mode="freeform_edit")
+    dispatch_mode = str(dispatch.get("mode") or "")
+    if dispatch_mode == "cloud_run_job_failed":
+        failed_at = _utc_now_iso()
+        error = str(dispatch.get("error") or "job trigger failed")
+        try:
+            doc_ref.update(
+                {
+                    "generation_status": "ready",
+                    "generation_phase": "ready",
+                    "generation_detail": "",
+                    "edit_request": None,
+                    "last_edit_result": {
+                        "status": "failed",
+                        "request_id": request_id,
+                        "kind": kind,
+                        "edit_engine": "",
+                        "edit_engine_label": "",
+                        "verified_changes": [],
+                        "unsupported_requests": [],
+                        "error": f"修正ジョブを開始できませんでした: {error[:200]}",
+                        "content_version": _content_version_of(doc_data),
+                        "applied_at": failed_at,
+                    },
+                    "updated_at": failed_at,
+                }
+            )
+        except Exception as revert_exc:  # noqa: BLE001
+            logger.warning("Could not revert %s after job trigger failure: %s", presentation_id, revert_exc)
+        user_message, next_action = _freeform_edit_messages("EDIT_FAILED", kind, None, "修正ジョブを開始できませんでした")
+        return {
+            "status": "EDIT_FAILED",
+            "presentation_id": presentation_id,
+            "share_url": share_url,
+            "kind": kind,
+            "verified_changes": [],
+            "error": error[:300],
+            "content_version": _content_version_of(doc_data),
+            "user_message": user_message,
+            "next_action": next_action,
+        }
+    try:
+        doc_ref.update(
+            {
+                "edit_dispatch": dispatch_mode,
+                "edit_execution": str(dispatch.get("execution", ""))[:300],
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.info("edit dispatch bookkeeping skipped: %s", exc)
+    if dispatch_mode == "sync":
+        snap = doc_ref.get()
+        data = (snap.to_dict() or {}) if snap.exists else {}
+        return _freeform_last_edit_payload(presentation_id, share_url, data, request_id, started)
+    eta = FREEFORM_CREATE_ETA if convert else FREEFORM_EDIT_ETA
+    user_message, _ = _freeform_edit_messages("EDIT_QUEUED", kind, None, "")
+    if convert:
+        user_message = (
+            "テンプレート版を自由デザイン版に作り直す依頼を受け付けました。完成するまでは今のテンプレート版に『更新中』と表示され、"
+            "完成すると同じURLのまま自動で切り替わります。"
+        )
+    return {
+        "status": "EDIT_QUEUED",
+        "presentation_id": presentation_id,
+        "share_url": share_url,
+        "kind": kind,
+        "request_id": request_id,
+        "render_mode": str(doc_data.get("render_mode") or "template"),
+        "edit_dispatch": dispatch_mode,
+        "estimated_completion": eta,
+        "verified_changes": [],
+        "content_version": _content_version_of(doc_data),
+        "user_message": user_message,
+        "next_action": (
+            f"まだ完了していません。『修正を受け付け、反映中です（{eta}）。共有URLでは今の版に「更新中」と表示され、完了すると"
+            "自動で新しい版に切り替わります』と伝えてください。反映済みと言ってはいけません。結果は get_proposal_status の"
+            " last_edit_result で確認できます。"
+        ),
+    }
+
+
+def _freeform_target_exists(bucket_name: str, prefix: str) -> bool:
+    try:
+        from google.cloud import storage
+
+        blob = storage.Client(project=_get_project_id()).bucket(bucket_name).blob(prefix + "index.html")
+        return bool(blob.exists())
+    except Exception as exc:  # noqa: BLE001 - unknown -> let the gateway decide
+        logger.info("version existence check skipped (%s): %s", prefix, exc)
+        return True
+
+
+def _freeform_undo(
+    presentation_id: str,
+    doc_ref: Any,
+    doc_data: dict[str, Any],
+    share_url: str,
+    started: float,
+) -> dict[str, Any]:
+    """Switches the published pointer back to the version this one was based on (no regeneration)."""
+    ff_meta = dict(doc_data.get("freeform") or {})
+    versions = [v for v in (doc_data.get("freeform_versions") or []) if isinstance(v, dict)]
+    by_number = {int(v.get("version") or 0): v for v in versions}
+    current = int(ff_meta.get("current_version") or 0)
+    entry = by_number.get(current)
+    if entry is not None and "based_on" in entry:
+        target_number = int(entry.get("based_on") or 0)
+    else:
+        lower = [number for number in by_number if 0 < number < current]
+        target_number = max(lower) if lower else 0
+    target = by_number.get(target_number) if target_number else None
+    bucket_name = str(doc_data.get("gcs_bucket") or _get_bucket_name())
+    updates: dict[str, Any]
+    if target is not None and target.get("prefix") and _freeform_target_exists(bucket_name, str(target["prefix"])):
+        prefix = str(target["prefix"])
+        ff_meta.update({"current_version": target_number, "prefix": prefix})
+        verified = [f"表示する自由デザイン版を v{current} から v{target_number} に戻しました"]
+        updates = {
+            "render_mode": "freeform",
+            "freeform_prefix": prefix,
+            "freeform": ff_meta,
+            "gcs_bucket": bucket_name,
+            "gcs_blob_path": prefix + "index.html",
+            "gcs_uri": f"gs://{bucket_name}/{prefix}index.html",
+        }
+        if target.get("slide_count"):
+            updates["slide_count"] = int(target.get("slide_count") or 0)
+        if isinstance(target.get("slide_titles"), list):
+            updates["slide_titles"] = [str(t) for t in target["slide_titles"]]
+        new_render_mode = "freeform"
+    elif doc_data.get("deck_spec"):
+        blob_path = f"presentations/{presentation_id}/index.html"
+        verified = [f"自由デザイン版 v{current} から、変換前のテンプレート版に戻しました"]
+        updates = {
+            "render_mode": "template",
+            "gcs_bucket": bucket_name,
+            "gcs_blob_path": blob_path,
+            "gcs_uri": f"gs://{bucket_name}/{blob_path}",
+        }
+        target_number = 0
+        new_render_mode = "template"
+    else:
+        return {
+            "status": "NO_CHANGE",
+            "presentation_id": presentation_id,
+            "share_url": share_url,
+            "kind": "undo",
+            "render_mode": "freeform",
+            "verified_changes": [],
+            "designer_notes": [],
+            "unsupported_requests": ["元に戻せる直前の版がありません（最初に作成された自由デザイン版を表示中です）"],
+            "content_version": _content_version_of(doc_data),
+            "user_message": "元に戻せる直前の版がないため、プレゼンテーションは変更していません。",
+            "next_action": "変更していないことを正直に伝えてください。",
+        }
+    now = _utc_now_iso()
+    new_content_version = _content_version_of(doc_data) + 1
+    last_edit = {
+        "status": "applied",
+        "request_id": uuid.uuid4().hex[:12],
+        "kind": "undo",
+        "edit_engine": "freeform_undo",
+        "edit_engine_label": describe_edit_engine("freeform_undo"),
+        "verified_changes": verified,
+        "designer_notes": [],
+        "unsupported_requests": [],
+        "previous_render_mode": "freeform",
+        "previous_freeform_version": current,
+        "freeform_version": target_number,
+        "content_version": new_content_version,
+        "elapsed_seconds": round(time.monotonic() - started, 1),
+        "applied_at": now,
+    }
+    updates.update(
+        {
+            "content_version": new_content_version,
+            "generation_status": "ready",
+            "generation_phase": "ready",
+            "generation_detail": "",
+            "edit_request": None,
+            "last_edit_result": last_edit,
+            "last_edited_at": now,
+            "updated_at": now,
+        }
+    )
+    doc_ref.update(updates)
+    user_message, next_action = _freeform_edit_messages("UPDATED", "undo", target_number, "")
+    return {
         "status": "UPDATED",
         "presentation_id": presentation_id,
-        "client_name": deck_obj.client_name,
-        "proposal_title": deck_obj.proposal_title,
-        "subtitle": deck_obj.subtitle,
-        "theme_color": deck_obj.theme_color,
-        "custom_callout": deck_obj.custom_callout,
-        "updated_fields": updated_fields,
-        "existing_html_loaded": bool(existing_html),
         "share_url": share_url,
-        "updated_at": now_utc.isoformat(),
-        "slide_outline": _build_slide_outline(deck_obj),
+        "kind": "undo",
+        "render_mode": new_render_mode,
+        "freeform_version": target_number or None,
+        "verified_changes": verified,
+        "designer_notes": [],
+        "unsupported_requests": [],
+        "edit_engine": "freeform_undo",
+        "edit_engine_label": describe_edit_engine("freeform_undo"),
+        "content_version": new_content_version,
+        "elapsed_seconds": round(time.monotonic() - started, 1),
+        "user_message": user_message,
+        "next_action": next_action,
     }
+
+
+def _freeform_edit_entry(
+    *,
+    presentation_id: str,
+    doc_ref: Any,
+    doc_data: dict[str, Any],
+    share_url: str,
+    instructions: str,
+    explicit: dict[str, str],
+    undo_last_edit: bool,
+    convert: bool,
+    started: float,
+    tool_context: ToolContext | None,
+) -> dict[str, Any]:
+    """Free-form decks (and template -> free-form conversion) are edited by the background job."""
+    if undo_last_edit:
+        result = _freeform_undo(presentation_id, doc_ref, doc_data, share_url, started)
+    elif not _freeform_enabled():
+        result = {
+            "status": "NO_CHANGE",
+            "presentation_id": presentation_id,
+            "share_url": share_url,
+            "render_mode": str(doc_data.get("render_mode") or "template"),
+            "verified_changes": [],
+            "designer_notes": [],
+            "unsupported_requests": [
+                "自由デザイン機能（FREEFORM_DESIGN_ENABLED）が無効のため、自由デザインでの修正・作り直しはできません"
+            ],
+            "content_version": _content_version_of(doc_data),
+            "user_message": "自由デザイン機能が無効のため、プレゼンテーションは変更していません。",
+            "next_action": "変更していないことと、その理由を正直に伝えてください。",
+        }
+    elif not instructions and not explicit:
+        result = {
+            "status": "ERROR",
+            "action": "edit_proposal_website",
+            "error_type": "MissingInput",
+            "presentation_id": presentation_id,
+            "share_url": share_url,
+            "user_message": "修正内容を自然文で指定してください（例：背景を白にして、売上推移のグラフを追加して）。",
+            "next_action": "ユーザーに具体的な修正内容を確認してから再度呼び出してください。",
+        }
+    else:
+        result = _queue_freeform_edit(
+            presentation_id=presentation_id,
+            doc_ref=doc_ref,
+            doc_data=doc_data,
+            share_url=share_url,
+            instructions=instructions,
+            explicit=explicit,
+            convert=convert,
+            started=started,
+        )
     if tool_context is not None:
         tool_context.state["last_edited_result"] = result
     return result
@@ -1852,6 +3120,16 @@ def _list_proposal_websites_impl(
                 "access_log_count": access_count,
                 "generation_status": data.get("generation_status", "ready" if data.get("deck_spec") else ""),
                 "generation_engine": data.get("generation_engine", ""),
+                "generation_engine_label": describe_generation_engine(str(data.get("generation_engine") or ""))
+                if data.get("generation_engine")
+                else "",
+                "design_style": data.get("design_style")
+                or (data.get("deck_spec") or {}).get("design_style")
+                or DEFAULT_DESIGN_STYLE,
+                "content_version": _content_version_of(data),
+                "last_edit_status": str((data.get("last_edit_result") or {}).get("status") or "")
+                if isinstance(data.get("last_edit_result"), dict)
+                else "",
             }
         )
 
@@ -2120,6 +3398,8 @@ def _delete_proposal_website_impl(
     )
 
     gcs_deleted = False
+    versions_deleted = 0
+    freeform_objects_deleted = 0
     if hard_delete_gcs:
         try:
             bucket_name = data.get("gcs_bucket") or _get_bucket_name()
@@ -2132,6 +3412,24 @@ def _delete_proposal_website_impl(
             if blob.exists():
                 blob.delete()
                 gcs_deleted = True
+            versions_prefix = f"presentations/{presentation_id}/versions/"
+            for version_blob in storage_client.list_blobs(bucket_name, prefix=versions_prefix):
+                try:
+                    version_blob.delete()
+                    versions_deleted += 1
+                except Exception as version_exc:  # noqa: BLE001
+                    logger.info("Version backup delete skipped: %s", version_exc)
+            # Free-form versions (presentations/<id>/v<N>/...), the template copy and staging files.
+            for prefix in (f"presentations/{presentation_id}/", f"staging/{presentation_id}/"):
+                for extra_blob in storage_client.list_blobs(bucket_name, prefix=prefix):
+                    name = str(getattr(extra_blob, "name", "") or "")
+                    if not name or name == blob_path or name.startswith(versions_prefix):
+                        continue
+                    try:
+                        extra_blob.delete()
+                        freeform_objects_deleted += 1
+                    except Exception as extra_exc:  # noqa: BLE001
+                        logger.info("Free-form object delete skipped: %s", extra_exc)
         except Exception as exc:
             logger.warning("Failed to delete GCS blob on revoke: %s", exc)
 
@@ -2142,6 +3440,8 @@ def _delete_proposal_website_impl(
         "proposal_title": data.get("proposal_title", ""),
         "is_active": False,
         "gcs_blob_deleted": gcs_deleted,
+        "gcs_versions_deleted": versions_deleted,
+        "gcs_freeform_objects_deleted": freeform_objects_deleted,
         "revoked_at": now_utc.isoformat(),
     }
     if tool_context is not None:
@@ -2156,58 +3456,81 @@ delete_presentation = delete_proposal_website
 # Interactive Conversational Concierge Root Agent (LlmAgent)
 # ---------------------------------------------------------------------------
 
-CONCIERGE_INSTRUCTION = """あなたは提案書Webサイト制作・配信・ライフサイクル管理を担う「インタラクティブ提案コンシェルジュ」です。
-ユーザーが対話を通じて高品質な6枚構成HTML5プレゼンテーションサイト（16:9・Tailwind CSS・GSAPアニメーション・カスタムスライドレイアウト）を企画・発行し、発行後の修正・閲覧ログ確認・パスワード変更・公開停止までをチャットだけで完結できるよう支援します。
+CONCIERGE_INSTRUCTION = """あなたは提案書Webサイトの制作・配信・ライフサイクル管理を担う「インタラクティブ提案コンシェルジュ」です。
+ユーザーが対話を通じてクライアント向けのHTML5プレゼンテーションサイト（16:9）を企画・発行し、発行後の修正・閲覧ログ確認・パスワード変更・公開停止までをチャットだけで完結できるよう支援します。
+
+【デザインの作り方は2通り】
+- **自由デザイン（既定）**: ADK のデザイナーエージェント（gemini-3.8-flash）が、枚数・レイアウト・配色・図解（SVG）・グラフ、必要に応じて AI 生成イメージ（最大4点）まで自由に設計します。公開前に描画結果のスクリーンショットをエージェント自身が見て、崩れや読みにくさを最大2回まで直します。所要時間は通常 7〜11 分（最長約 20 分）です。
+- **高速モード（テンプレート）**: 定型の6枚構成テンプレートで、通常 1〜5 分で完成します。ユーザーが「高速モード」「テンプレートで」「急ぎで」と明示した場合だけ使います。
 
 【最重要ルール：挨拶や曖昧な発話で勝手にWebサイトを生成しないこと】
 1. **挨拶・初回相談時の対応（ツール呼び出し禁止）**:
    - ユーザーが「こんにちは」「はじめまして」「何ができますか？」「提案書を作りたい」など、具体的なクライアント名や作成指示を含まない挨拶・相談をしてきた場合は、**絶対に `create_proposal_website` を呼び出さないでください**。
-   - まずは丁寧な日本語で挨拶し、あなたが提供できる機能（①社内ナレッジ検索と構成案の壁打ち、②クライアント専用HTMLプレゼンサイトの新規発行と限定公開URL・ID/Pass発行、③発行済みサイトの自然言語での修正・閲覧ログ確認・パスワード再発行・公開停止）を案内してください。
-   - その上で、以下のヒアリング項目を問いかけてください：
+   - まずは丁寧な日本語で挨拶し、提供できる機能（①社内ナレッジ検索と構成案の壁打ち、②クライアント専用HTMLプレゼンサイトの新規発行と限定公開URL・ID/Pass発行、③発行済みサイトの自然言語での修正・閲覧ログ確認・パスワード再発行・公開停止）を案内してください。
+   - そのうえで、次の項目を問いかけてください：
      - ① 提案先のクライアント企業名・業界
      - ② 解決したい課題や提案テーマ（例：AIコンシェルジュ、統合データ基盤、OMOマーケなど）
-     - ③ ご希望のデザインテーマカラー（`sky` / `emerald` / `violet` / `amber` / `rose`）や強調したい実績数値
+     - ③ 見た目の希望（背景色・雰囲気・グラフや図解や画像の要否・枚数など）と、強調したい実績数値
+     - ④ 自由デザイン（通常 7〜11 分）と高速モード（テンプレート、通常 1〜5 分）のどちらにするか（指定がなければ自由デザイン）
 
 2. **構成案の相談・社内ナレッジ検索 (`search_internal_knowledge`)**:
-   - ユーザーが「まずは構成案を相談したい」「過去の類似事例を調べて」と依頼した場合は、`search_internal_knowledge` を呼び出して社内データストアの過去RFP・導入事例・標準メソドロジーを検索し、全6スライドの構成案をチャット上で提示して「この内容でWebサイトを発行してよろしいでしょうか？」と確認してください。
+   - 「まずは構成案を相談したい」「過去の類似事例を調べて」と依頼されたら、`search_internal_knowledge` で社内データストアの過去RFP・導入事例・標準メソドロジーを検索し、構成案をチャット上で提示して「この内容でWebサイトを発行してよろしいでしょうか？」と確認してください。自由デザインなら枚数は内容に合わせて提案してかまいません。
 
 3. **提案Webサイトの新規生成・限定公開 (`create_proposal_website`)**:
-   - ユーザーがクライアント名と提案テーマを指定して「提案プレゼンテーションHTMLを作成・公開してください」「この内容でWebサイトを発行して」「はい、お願いします」と明示的に依頼・承認した場合にのみ、`create_proposal_website` を呼び出してください。
-   - 呼び出し時は `client_name` / `proposal_title` / `proposal_brief` / `theme_color` を自然言語で渡してください。チャットで合意した構成案やスライドごとの要点は **`proposal_brief` の中に文章として含めてください**。`deck_spec_json` には完全な `PresentationDeckSpec` JSON が手元にある場合以外は何も渡さないでください（独自形式の構成JSONを渡す必要はありません）。
-   - このツールは **即座に** 共有URL・閲覧用ID・パスワードを発行して返します（`status` が `GENERATING`）。スライド本体は裏側で Managed Agents API（Antigravity ハーネス）が生成し、最大約10分の時間予算を超えた場合は自動的に gemini-3.8-flash の高速生成へ切り替わるため、必ず完成します。
-   - ツール応答を受け取ったら、**その同じターン内で必ず** 以下を日本語でわかりやすく提示してください（決して無言で終わらないこと）：
+   - ユーザーがクライアント名と提案テーマを指定して「この内容でWebサイトを発行して」「はい、お願いします」などと明示的に依頼・承認した場合にのみ呼び出してください。
+   - `client_name` / `proposal_title` / `proposal_brief` / `theme_color` を自然言語で渡し、合意した構成案やスライドごとの要点は **`proposal_brief` の中に文章として含めてください**。
+   - **数値の扱い（重要）**: `proposal_brief` に書く数値（割合・金額・件数・期間など）は、ユーザーが会話で述べたものか `search_internal_knowledge` の結果に書かれているものだけにしてください。あなたが考えた効果見込みを入れる場合は、数値の直後に必ず「（試算）」または「（目標）」と付け、根拠のある数値と区別してください。デザイナーはこの資料を根拠として公開前に数値を照合するため、ここで作った数値はそのままスライドに載ってしまいます。
+   - `design_mode` は既定で `freeform` とし、高速モードを頼まれたときだけ `template` にしてください。見た目の希望（背景色・雰囲気・グラフ・図解・画像・枚数など）は、ユーザーの言葉のまま `design_request` に入れてください。テンプレートで白背景などの希望があれば `design_style` も指定します。
+   - `deck_spec_json` には、完全な `PresentationDeckSpec` JSON が手元にある場合以外は何も渡さないでください。
+   - このツールは **即座に** 共有URL・閲覧用ID・パスワードを発行して返します（`status` が `GENERATING`）。スライド本体は裏側で生成され、自由デザイン版を公開できない場合もテンプレートで必ず仕上がります。
+   - ツール応答を受け取ったら、**その同じターン内で必ず** 次を日本語でわかりやすく提示してください（決して無言で終わらないこと）：
      1. **プレゼンテーションID** (`presentation_id`)
      2. **顧客共有用プレゼンテーションURL** (`share_url`)
      3. **閲覧用ID** (`viewer_id`)
      4. **初期パスワード** (`viewer_password`)
-     5. **有効期限** (`expires_at`) と **デザインテーマ** (`theme_color`)
-     6. 生成状況の案内：「現在AIがスライドを生成中です。URLを開くと生成中画面が表示され、完成すると自動的に提案ページへ切り替わります（通常1〜5分、最長でも約10分）。」
+     5. **有効期限** (`expires_at`) と **デザインの作り方** (`design_mode`)
+     6. 生成状況の案内：「現在AIがスライドを生成中です。URLを開くと生成中画面が表示され、完成すると自動的に提案ページへ切り替わります」と、`estimated_completion` の目安（自由デザインは通常 7〜11 分、高速モードは通常 1〜5 分）。自由デザインなら「公開前にエージェントが描画結果を見て見直します」と添えてください。
    - `status` が `PUBLISHED` の場合は、既に完成済みであることと `slide_outline` の構成サマリーを提示してください。
-   - `status` が `ERROR` の場合は、`user_message` と `next_action` に従ってユーザーに状況を説明し、必要な情報を確認してください。
+   - `status` が `ERROR` の場合は、`user_message` と `next_action` に従って状況を説明し、必要な情報を確認してください。
 
-4. **生成状況の確認 (`get_proposal_status`)**:
-   - 「生成状況を教えて」「まだ完成しない？」「どのエンジンで作られた？」と聞かれたら `get_proposal_status` を呼び出し、`generation_status`（generating / ready / failed）、`generation_phase`、経過時間、完成時は `generation_engine_label`（Managed Agents API で完成したのか、gemini-3.8-flash 高速生成に自動切替されたのか）を報告してください。
+4. **生成・修正状況の確認 (`get_proposal_status`)**:
+   - 「生成状況を教えて」「まだ完成しない？」「修正は反映された？」「どのエンジンで作られた？」と聞かれたら呼び出し、`generation_status`（generating / updating / ready / failed）、`generation_phase_label`、経過時間、完成時は `generation_engine_label` を報告してください。
+   - 自由デザイン版が公開されていれば `freeform_version` と、公開前にエージェントが描画結果を見直した回数（`review_rounds`）を伝え、`freeform_warnings` があれば補足してください。`freeform_fallback_reason` が空でなければ、自由デザイン版は公開できずテンプレートで仕上げたことを正直に伝えてください。
+   - 修正の結果は `last_edit_result` で確認し、次の5のルールに従って報告してください。
 
 5. **発行済みWebサイトの管理・修正・削除（ライフサイクル管理ツール）**:
    - **一覧確認**: 「発行済みのサイト一覧を見せて」と言われたら `list_proposal_websites` を呼び出してください。
    - **閲覧監査ログ確認**: 「誰がいつアクセスしたかログを見せて」と言われたら `get_proposal_access_logs` を呼び出してください。
-   - **内容・デザインの修正**: 「発行済みの `<presentation_id>` のタイトルやテーマカラー、内容を修正して」と言われたら `edit_proposal_website` を呼び出し、同じURLのまま最新HTMLへ更新したことを伝えてください。`status` が `GENERATING` なら、まだ生成中のため完成後に再度依頼いただくよう案内してください。
+   - **内容・デザインの修正**: 「タイトルや色、内容を修正して」「背景を白に」「グラフを足して」「ぜんぜん違う見た目に」などと言われたら、ユーザーの依頼文をそのまま `edit_instructions` に入れて `edit_proposal_website` を呼び出してください。
+     - **自由デザイン版**の修正は、どんな変更でも受け付けます。裏側でデザイナーエージェントが修正し、描画結果を確認してから公開します。`status` が `EDIT_QUEUED` のときは**まだ完了していません**。「修正を受け付け、反映中です（通常 5〜7 分）。共有URLでは今の版に『更新中』と表示され、完了すると自動で新しい版に切り替わります」と伝え、完了したかは `get_proposal_status` で確認できると案内してください。
+     - **テンプレート版**の修正は通常15〜60秒で終わります。全体の見た目（背景色・質感）は `new_design_style`（`immersive-dark` 濃紺ダーク／`clean-light` 白基調クリーン／`editorial-light` 生成り色エディトリアル）、アクセントカラーは `new_theme_color` も併せて指定してください。テンプレートで表現できない依頼（スライドの追加・削除、グラフ・図解・画像の追加、レイアウトの作り替えなど）は `NO_CHANGE` になります。その場合は「自由デザイン版に作り直せば対応できます（同じURLのまま、通常 7〜11 分）」と提案し、ユーザーが了承したら `convert_to_freeform` を true にし、依頼文を `edit_instructions` に入れて呼び出してください。
+     - `status` が `UPDATED` のとき、または `last_edit_result` の `status` が `applied` のときだけ「反映しました」と伝え、**`verified_changes`（公開前後を機械的に比べて確認できた変更）だけ**を箇条書きで報告してください。`designer_notes` はデザイナーエージェント自身の説明（自己申告）です。そうと分かるように区別して添える程度にとどめ、`verified_changes` にない変更を「実施した」と言ってはいけません。
+     - `unsupported_requests` があれば「反映できなかった点」として正直に伝え、代替案を示してください。
+     - `NO_CHANGE` のときは、プレゼンテーションは変更されていないことを正直に伝え、どこをどう変えたいかを具体的に聞き返してください。
+     - `BUSY` は前の修正を反映中、`GENERATING` は初回生成中です。少し待ってから再度依頼いただくよう案内してください。`EDIT_FAILED` / `ERROR` のときは、修正前の版のままであることを伝えてください。
+     - 「元に戻して」「さっきの修正を取り消して」と言われたら `undo_last_edit` を true にして呼び出してください。自由デザイン版は1つ前の版に即座に切り替わります。
    - **パスワード再発行・期限延長**: 「パスワードを再発行して」「有効期限を延長して」と言われたら `manage_proposal_credentials` を呼び出し、新しい認証情報を提示してください。
-   - **公開停止・削除**: 「`<presentation_id>` の公開を停止（削除）して」と言われたら `delete_proposal_website` を呼び出し、外部からのアクセスが即座に遮断（HTTP 403）されたことを報告してください。
+   - **公開停止・削除**: 「公開を停止（削除）して」と言われたら `delete_proposal_website` を呼び出し、外部からのアクセスが即座に遮断（HTTP 403）されたことを報告してください。
    - いずれのツールも `status` が `NOT_FOUND` / `ERROR` の場合は、その旨と `user_message` をユーザーに伝えてください。
+
+6. **Google Cloud 製品名の表記ルール**:
+   - 構成案・スライド本文・回答では現行の正式名称（`Gemini Enterprise Agent Platform` / `Agent Runtime` / `Agent Search` / `Gemini 3.8 Flash`）を使い、旧ブランド名（Gemini Enterprise Agent Platform へ改称する前の名称）や旧世代のモデル名は使わないでください。
+
+7. **報告の正確性（厳守）**:
+   - ツールの結果で確認できていない変更や完了を「反映しました」「完了しました」と伝えないでください。`EDIT_QUEUED` や `GENERATING` は受付・処理中であり、完了ではありません。ツール結果に含まれない内容を推測で補わず、反映できなかったことは正直に伝えてください。
 """
 
 root_agent = LlmAgent(
     name="proposal_site_publisher_agent",
     model=Gemini(
         model=MODEL,
-        client_kwargs={"location": _get_genai_location(MODEL)},
         retry_options=types.HttpRetryOptions(attempts=3),
+        client_kwargs={"location": _get_genai_location(MODEL)},
     ),
     description=(
-        "対話型コンシェルジュによるクライアント提案用HTML5スライドWebサイト生成・限定公開・ライフサイクル管理エージェント。"
-        "ヒアリングと社内ナレッジ検索、6枚構成インタラクティブHTMLサイトの非同期生成（Managed Agents API → gemini-3.8-flash 自動フォールバック）、"
-        "発行後の修正・閲覧ログ確認・パスワード再発行・公開停止（削除）を一気通貫で実行します。"
+        "対話型コンシェルジュによるクライアント提案用HTML5プレゼンテーションWebサイトの生成・限定公開・ライフサイクル管理エージェント。"
+        "ヒアリングと社内ナレッジ検索、ADK のデザイナーエージェントによる自由デザイン（描画結果をエージェント自身が確認して修正）"
+        "または高速テンプレートでの非同期生成、発行後の修正・取り消し・閲覧ログ確認・パスワード再発行・公開停止（削除）を一気通貫で実行します。"
     ),
     instruction=CONCIERGE_INSTRUCTION,
     tools=[

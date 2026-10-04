@@ -1,0 +1,220 @@
+/*!
+ * NY deck runtime v1 — shared presentation runtime for free-form decks.
+ * Fixed 1920x1080 stage scaled to the viewport, page navigation, progress, reveal / count-up / tabs
+ * components, ECharts mounts, AI-image captions and print layout. Authors never write JavaScript:
+ * every interactive behaviour is opt-in through data-pd-* attributes.
+ * Licensed under the Apache License, Version 2.0.
+ */
+
+/* ---------- Overridable defaults (zero specificity via :where) ---------- */
+:where(html.pd-runtime),
+:where(html.pd-runtime) body {
+  background: #0b0d12;
+}
+
+/* ---------- Stage (non-negotiable layout) ---------- */
+html.pd-runtime,
+html.pd-runtime body {
+  margin: 0 !important;
+  padding: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  overflow: hidden !important;
+}
+
+#pd-stage {
+  position: fixed !important;
+  inset: 0 !important;
+  overflow: hidden !important;
+  background: inherit;
+}
+
+#pd-deck {
+  position: absolute !important;
+  left: 50% !important;
+  top: 50% !important;
+  width: 1920px !important;
+  height: 1080px !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  transform-origin: 50% 50% !important;
+  overflow: hidden !important;
+}
+
+#pd-deck > section.pd-slide {
+  position: absolute !important;
+  left: 0 !important;
+  top: 0 !important;
+  width: 1920px !important;
+  height: 1080px !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  box-sizing: border-box;
+  overflow: hidden !important;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.45s ease, visibility 0s linear 0.45s;
+}
+
+#pd-deck > section.pd-slide.is-active {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  z-index: 1;
+  transition: opacity 0.45s ease, visibility 0s;
+}
+
+html.pd-instant #pd-deck > section.pd-slide,
+html.pd-instant [data-pd-reveal],
+html.pd-instant .pd-ai-badge {
+  transition: none !important;
+  animation: none !important;
+}
+
+/* ---------- Reveal ---------- */
+html.pd-runtime [data-pd-reveal] {
+  opacity: 0;
+  transform: translateY(24px);
+  transition: opacity 0.6s ease, transform 0.6s cubic-bezier(0.2, 0.7, 0.2, 1);
+  transition-delay: var(--pd-delay, 0ms);
+}
+html.pd-runtime [data-pd-reveal="fade"] { transform: none; }
+html.pd-runtime [data-pd-reveal="zoom"] { transform: scale(0.94); }
+html.pd-runtime [data-pd-reveal="left"] { transform: translateX(-32px); }
+html.pd-runtime [data-pd-reveal="right"] { transform: translateX(32px); }
+html.pd-runtime [data-pd-reveal].is-revealed {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---------- Tabs ---------- */
+html.pd-runtime [data-pd-panel]:not(.is-active) { display: none !important; }
+html.pd-runtime [data-pd-tab] { cursor: pointer; }
+
+/* ---------- Charts ---------- */
+.pd-chart { position: relative; }
+.pd-chart-badge,
+.pd-ai-badge {
+  position: absolute;
+  z-index: 3;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.74);
+  color: #fff;
+  font: 600 16px/1.2 "Noto Sans JP", system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.pd-chart-badge { top: 10px; right: 10px; }
+.pd-ai-badge {
+  transform: translate(calc(-100% - 12px), calc(-100% - 12px));
+  opacity: 0;
+  transition: opacity 0.4s ease 0.7s;
+}
+.pd-slide.is-active .pd-ai-badge,
+html.pd-capture .pd-ai-badge { opacity: 1; }
+.pd-chart-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  border: 2px dashed rgba(244, 63, 94, 0.7);
+  border-radius: 12px;
+  color: #f43f5e;
+  font: 600 18px/1.4 system-ui, sans-serif;
+  text-align: center;
+  background: rgba(244, 63, 94, 0.06);
+}
+
+/* ---------- Injected chrome ---------- */
+.pd-chrome {
+  position: fixed;
+  z-index: 2147483000;
+  font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans JP", sans-serif;
+  transition: opacity 0.3s ease;
+}
+#pd-progress {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 4px;
+  background: rgba(127, 127, 127, 0.25);
+}
+#pd-progress > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--pd-accent, #38bdf8);
+  transition: width 0.4s ease;
+}
+#pd-nav {
+  right: 18px;
+  bottom: 16px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.6);
+  color: #fff;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+#pd-nav button {
+  appearance: none;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  cursor: pointer;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+}
+#pd-nav button:hover { background: rgba(255, 255, 255, 0.16); }
+#pd-nav button:focus-visible { outline: 2px solid #fff; outline-offset: 1px; }
+#pd-nav button[disabled] { opacity: 0.35; cursor: default; }
+#pd-counter {
+  min-width: 64px;
+  text-align: center;
+  font: 600 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+html.pd-idle .pd-chrome.pd-autohide { opacity: 0; pointer-events: none; }
+html.pd-capture .pd-chrome { display: none !important; }
+
+/* ---------- Print: one slide per landscape page ---------- */
+@media print {
+  @page { size: 1920px 1080px; margin: 0; }
+  html.pd-runtime,
+  html.pd-runtime body { width: auto !important; height: auto !important; overflow: visible !important; }
+  #pd-stage { position: static !important; overflow: visible !important; }
+  #pd-deck {
+    position: static !important;
+    transform: none !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+  #pd-deck > section.pd-slide {
+    position: relative !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    break-after: page;
+    page-break-after: always;
+    transition: none !important;
+  }
+  html.pd-runtime [data-pd-reveal] { opacity: 1 !important; transform: none !important; }
+  .pd-chrome { display: none !important; }
+  .pd-ai-badge { opacity: 1 !important; }
+}

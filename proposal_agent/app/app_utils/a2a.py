@@ -40,7 +40,12 @@ from google.adk.a2a.utils.agent_card_builder import AgentCardBuilder
 
 
 class _A2AServerCallContextBuilder(DefaultServerCallContextBuilder):
-    """Context builder that ensures A2A-Version defaults correctly when missing."""
+    """Context builder that ensures A2A-Version defaults correctly when missing.
+
+    Proxy infrastructure (e.g. Google Cloud API Gateways) can strip custom HTTP headers
+    like 'A2A-Version'. This builder attempts to infer A2A-version from the method name
+    when the header is missing.
+    """
 
     def build(self, request):
         context = super().build(request)
@@ -55,6 +60,8 @@ class _A2AServerCallContextBuilder(DefaultServerCallContextBuilder):
             headers["A2A-Version"] = existing_version
             return context
 
+        # 0.3 uses method names that include a '/' like "message/send"
+        # 1.0 uses PascalCase like "SendMessage"
         json_body = getattr(request, "_json", {}) or {}
         method = json_body.get("method") if isinstance(json_body, dict) else None
 
@@ -71,6 +78,9 @@ if TYPE_CHECKING:
     from google.adk.agents import BaseAgent
     from google.adk.runners import Runner
 
+# URI advertised on the agent card describing the executor extension shipped
+# by ADK. Kept as a module-level constant so callers can override or extend
+# the capabilities list when needed.
 _ADK_AGENT_EXECUTOR_EXTENSION_URI = (
     "https://google.github.io/adk-docs/a2a/a2a-extension/"
 )
@@ -78,7 +88,8 @@ _ADK_AGENT_EXECUTOR_EXTENSION_URI = (
 
 async def _add_v0_3_compat_interface(card: AgentCard) -> AgentCard:
     """Advertise a v0.3 JSON-RPC interface so the served card stays consumable by
-    v0.3 A2A clients — notably Gemini Enterprise registration."""
+    v0.3 A2A clients — notably Gemini Enterprise registration, whose validator
+    still requires the 0.3 card shape (top-level ``url``/``protocolVersion``)."""
     if card.supported_interfaces:
         card.supported_interfaces.append(
             AgentInterface(
@@ -104,7 +115,13 @@ def _default_capabilities() -> AgentCapabilities:
 
 
 def _resolve_app_url(app_url: str | None) -> str:
-    """Resolve the public base URL advertised inside the agent card."""
+    """Resolve the public base URL advertised inside the agent card.
+
+    Falls back in order: explicit ``app_url``, the ``APP_URL`` env var, the
+    Agent Runtime ``/api`` passthrough self-built from runtime env vars (valid
+    on the first deploy, before the CLI knows the server-assigned engine ID),
+    then a local default.
+    """
     if app_url:
         return app_url
     if env_url := os.getenv("APP_URL"):
@@ -112,6 +129,8 @@ def _resolve_app_url(app_url: str | None) -> str:
 
     agent_engine_id = os.getenv("GOOGLE_CLOUD_AGENT_ENGINE_ID")
     project = os.getenv("GOOGLE_CLOUD_PROJECT")
+    # Not GOOGLE_CLOUD_LOCATION: the agent pins it to "global", which would build
+    # an invalid "global-aiplatform.googleapis.com" URL.
     location = os.getenv("GOOGLE_CLOUD_AGENT_ENGINE_LOCATION", "us-central1")
     if agent_engine_id and project and location:
         return (
@@ -134,7 +153,15 @@ async def attach_a2a_routes(
     agent_version: str | None = None,
     app_url: str | None = None,
 ) -> None:
-    """Register A2A routes (JSON-RPC + agent-card endpoints) under ``rpc_path``."""
+    """Register A2A routes (JSON-RPC + agent-card endpoints) under ``rpc_path``.
+
+    Builds a dynamic agent card from ``agent`` and mounts the routes on ``app``.
+    The ``runner`` should share the session/artifact/memory services with the
+    standard ADK path. ``capabilities``, ``agent_version``, and ``app_url``
+    override their defaults (streaming + ADK extension, ``AGENT_VERSION``,
+    ``APP_URL``). Call once per app — typically in a FastAPI ``lifespan``, since
+    the card is built asynchronously; repeated calls register duplicate routes.
+    """
     resolved_app_url = _resolve_app_url(app_url)
     resolved_agent_version = agent_version or os.getenv("AGENT_VERSION", "0.1.0")
     resolved_capabilities = capabilities or _default_capabilities()

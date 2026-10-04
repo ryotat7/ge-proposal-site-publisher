@@ -6,12 +6,15 @@ description: >-
   grid, As-Is/To-Be comparison matrix, 4-layer architecture flow, 3-phase
   roadmap timeline, and ROI action matrix), Tailwind CSS, GSAP animations, and
   keyboard/button navigation. Use when synthesizing or editing client proposal
-  presentation websites via Managed Agents API or ADK tools.
+  presentation websites in template mode (design_mode=template, the fast mode
+  and fallback). Free-form decks use freeform-deck-designer instead.
 ---
 
 # Interactive Slide Designer Skill
 
 Produces executive-grade, single-file interactive HTML5 slide decks (`index.html`) tailored to each client's industry, visual tone, and strategic narrative.
+
+> **Scope:** This skill covers the template pipeline only (`design_mode=template`: the 高速モード, and the fallback when no free-form build is publishable). Free-form decks (`design_mode=freeform`, the default) follow `app/skills/freeform-deck-designer/SKILL.md` and the output contract in `app/deck_contract.py`.
 
 ## 1. Non-Negotiable Structural Contract
 
@@ -48,7 +51,7 @@ Never repeat the same 3-column card grid on every slide. Assign a distinct layou
 
 See [references/design_patterns.md](references/design_patterns.md) for theme color palettes (`sky`, `emerald`, `violet`, `amber`, `rose`) and HTML/CSS snippets.
 
-## 3. Managed Agents API & Editing Workflow
+## 3. Creation & Editing Workflow
 
 - **New Deck Creation**:
   1. Ground the storyline using internal knowledge search results and user consultation notes.
