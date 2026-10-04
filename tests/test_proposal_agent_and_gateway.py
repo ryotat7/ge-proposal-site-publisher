@@ -1398,20 +1398,33 @@ def test_concierge_instruction_requires_truthful_edit_reports() -> None:
 def test_search_internal_knowledge_federates_drive_and_salesforce_datastores(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from google.cloud import discoveryengine_v1 as discoveryengine
     from app.agent import _get_datastore_ids, search_internal_knowledge
 
-    # Supports both comma-separated and colon-separated (deploy.sh safe) multi-datastore configs
-    monkeypatch.setenv("AGENT_SEARCH_DATASTORE_ID", "drive-past-rfps-ds:salesforce-crm-ds, drive-past-rfps-ds")
+    # Supports comma/colon-separated IDs as well as full Discovery Engine dataStore resource paths
+    monkeypatch.setenv(
+        "AGENT_SEARCH_DATASTORE_ID",
+        "projects/sample-gcp-project/locations/global/collections/default_collection/dataStores/drive-past-rfps-ds:"
+        "salesforce-crm-ds, drive-past-rfps-ds",
+    )
     assert _get_datastore_ids() == ["drive-past-rfps-ds", "salesforce-crm-ds"]
 
-    def _make_hit(doc_id: str, struct_data: dict[str, Any], derived_data: dict[str, Any]) -> MagicMock:
+    def _make_real_proto_hit(
+        doc_id: str,
+        struct_data: dict[str, Any],
+        derived_data: dict[str, Any],
+    ) -> MagicMock:
+        # Use a real discoveryengine.Document so struct_data / derived_struct_data are ProtoPlus MapComposite
+        # and nested lists are RepeatedComposite (verifying recursive conversion beyond plain dicts).
         hit = MagicMock()
-        hit.document.id = doc_id
-        hit.document.struct_data = struct_data
-        hit.document.derived_struct_data = derived_data
+        hit.document = discoveryengine.Document(
+            id=doc_id,
+            struct_data=struct_data,
+            derived_struct_data=derived_data,
+        )
         return hit
 
-    drive_hit = _make_hit(
+    drive_hit = _make_real_proto_hit(
         "drive-doc-001",
         {},
         {
@@ -1425,12 +1438,14 @@ def test_search_internal_knowledge_federates_drive_and_salesforce_datastores(
             ],
         },
     )
-    sf_hit = _make_hit(
+    sf_hit = _make_real_proto_hit(
         "sf-opp-001",
         {
             "Name": "株式会社アクメリテール - 次世代OMO・AIコンシェルジュ刷新案件",
-            "AccountName": "株式会社アクメリテール",
-            "Industry": "小売・流通（オムニチャネル）",
+            "Account": {
+                "Name": "株式会社アクメリテール",
+                "Industry": "小売・流通（オムニチャネル）",
+            },
             "StageName": "Proposal/Price Quote（提案・見積提示中）",
             "NextStep": "来週の経営会議向けに比較表付きインタラクティブWeb提案サイトを提出",
             "Description": "競合A社とコンペ中。デジタル承認ワークフローとBefore/After比較の明示が必須要件。",
@@ -1486,7 +1501,10 @@ def test_seed_datastore_preserves_real_connectors_and_binds_engine(
     sys.path.insert(0, str(ROOT_DIR / "infra"))
     import seed_datastore  # noqa: E402
 
-    assert seed_datastore.parse_datastore_ids("drive-ds, salesforce-ds:drive-ds") == [
+    assert seed_datastore.parse_datastore_ids(
+        "projects/sample-gcp-project/locations/global/collections/default_collection/dataStores/drive-ds, "
+        "salesforce-ds:drive-ds"
+    ) == [
         "drive-ds",
         "salesforce-ds",
     ]
@@ -1566,8 +1584,8 @@ def test_seed_datastore_preserves_real_connectors_and_binds_engine(
         patch("google.auth.default", return_value=(MagicMock(), "sample-gcp-project")),
         patch("google.auth.transport.requests.AuthorizedSession", _FakeAuthorizedSession),
     ):
-        # 1. SEED_MODE=real: existing drive-ds is preserved untouched; no synthetic docs are upserted
-        monkeypatch.setenv("AGENT_SEARCH_DATASTORE_ID", "drive-ds")
+        # 1. SEED_MODE=real: existing drive-ds is preserved untouched; missing-sfdc-ds is skipped and not bound
+        monkeypatch.setenv("AGENT_SEARCH_DATASTORE_ID", "drive-ds,missing-sfdc-ds")
         monkeypatch.setenv("SEED_MODE", "real")
         res_real = seed_datastore.seed_knowledge_files()
         assert res_real["existing_preserved"] == ["drive-ds"]

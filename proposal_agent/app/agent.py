@@ -27,7 +27,7 @@ import secrets
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -210,6 +210,14 @@ def _get_datastore_id() -> str:
     )
 
 
+def _normalize_datastore_id(token: str) -> str:
+    """Extracts the bare DataStore ID if a full projects/.../dataStores/<id> resource name was provided."""
+    cleaned = token.strip().strip("/")
+    if "/dataStores/" in cleaned:
+        cleaned = cleaned.split("/dataStores/", 1)[1].split("/", 1)[0].strip()
+    return cleaned
+
+
 def _get_datastore_ids() -> list[str]:
     """Parses one or more Agent Search DataStore IDs from AGENT_SEARCH_DATASTORE_ID(S) (comma/colon/semicolon-separated)."""
     raw = (
@@ -219,7 +227,7 @@ def _get_datastore_ids() -> list[str]:
     )
     parsed: list[str] = []
     for token in re.split(r"[,:;|\s]+", raw):
-        cleaned = token.strip()
+        cleaned = _normalize_datastore_id(token)
         if cleaned and cleaned not in parsed:
             parsed.append(cleaned)
     return parsed or ["proposal-knowledge-datastore"]
@@ -1314,13 +1322,41 @@ def _edit_deck_with_gemini(
 
 _SALESFORCE_STRUCT_KEYS = {
     "StageName",
+    "stageName",
+    "stage_name",
     "AccountId",
+    "accountId",
     "OpportunityId",
+    "opportunityId",
     "NextStep",
+    "nextStep",
+    "next_step",
     "Amount",
     "CloseDate",
+    "closeDate",
     "AccountName",
+    "accountName",
 }
+
+
+def _to_plain_value(value: Any) -> Any:
+    """Recursively converts ProtoPlus MapComposite / RepeatedComposite values into plain Python dicts/lists."""
+    if isinstance(value, Mapping):
+        return {str(k): _to_plain_value(v) for k, v in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_to_plain_value(item) for item in value]
+    return value
+
+
+def _to_plain_dict(mapping: Any) -> dict[str, Any]:
+    if not mapping:
+        return {}
+    if isinstance(mapping, Mapping):
+        return {str(k): _to_plain_value(v) for k, v in mapping.items()}
+    try:
+        return {str(k): _to_plain_value(v) for k, v in dict(mapping).items()}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _infer_source_type(
@@ -1356,30 +1392,42 @@ def _infer_source_type(
 
 
 def _extract_document_record(doc: Any, ds_id: str) -> dict[str, Any]:
-    struct_data = dict(doc.struct_data) if getattr(doc, "struct_data", None) else {}
-    derived_data = (
-        dict(doc.derived_struct_data)
-        if getattr(doc, "derived_struct_data", None)
+    struct_data = _to_plain_dict(getattr(doc, "struct_data", None))
+    if not struct_data:
+        raw_json_data = getattr(doc, "json_data", None)
+        if isinstance(raw_json_data, str) and raw_json_data.strip():
+            try:
+                parsed_json = json.loads(raw_json_data)
+                if isinstance(parsed_json, Mapping):
+                    struct_data = _to_plain_dict(parsed_json)
+            except Exception:  # noqa: BLE001
+                pass
+    derived_data = _to_plain_dict(getattr(doc, "derived_struct_data", None))
+
+    snippets: list[str] = []
+    for key in ("snippets", "extractive_answers", "extractive_segments", "chunks"):
+        for item in derived_data.get(key) or []:
+            if isinstance(item, Mapping):
+                text = item.get("snippet") or item.get("content") or item.get("text")
+                if text:
+                    snippets.append(str(text).strip())
+            elif isinstance(item, str) and item.strip():
+                snippets.append(item.strip())
+
+    account_obj = (
+        struct_data.get("Account")
+        if isinstance(struct_data.get("Account"), Mapping)
         else {}
     )
-    snippets: list[str] = []
-    for item in derived_data.get("snippets") or []:
-        if isinstance(item, dict) and item.get("snippet"):
-            snippets.append(str(item["snippet"]).strip())
-    for item in derived_data.get("extractive_answers") or []:
-        if isinstance(item, dict) and item.get("content"):
-            snippets.append(str(item["content"]).strip())
-    for item in derived_data.get("extractive_segments") or []:
-        if isinstance(item, dict) and item.get("content"):
-            snippets.append(str(item["content"]).strip())
-
+    raw_doc_uri = getattr(doc, "uri", None)
+    doc_uri = raw_doc_uri if isinstance(raw_doc_uri, str) else ""
     source_uri = str(
         struct_data.get("source_uri")
         or struct_data.get("uri")
         or struct_data.get("link")
         or derived_data.get("link")
         or derived_data.get("uri")
-        or getattr(doc, "uri", "")
+        or doc_uri
         or ""
     )
     source_type = _infer_source_type(ds_id, struct_data, derived_data, source_uri)
@@ -1388,7 +1436,9 @@ def _extract_document_record(doc: Any, ds_id: str) -> dict[str, Any]:
     title = (
         struct_data.get("title")
         or struct_data.get("Name")
+        or struct_data.get("name")
         or struct_data.get("Subject")
+        or struct_data.get("subject")
         or derived_data.get("title")
         or doc_id
     )
@@ -1396,18 +1446,31 @@ def _extract_document_record(doc: Any, ds_id: str) -> dict[str, Any]:
         struct_data.get("client_name")
         or struct_data.get("AccountName")
         or struct_data.get("account_name")
+        or struct_data.get("accountName")
+        or account_obj.get("Name")
+        or account_obj.get("name")
         or ""
     )
-    industry = struct_data.get("industry") or struct_data.get("Industry") or ""
+    industry = (
+        struct_data.get("industry")
+        or struct_data.get("Industry")
+        or account_obj.get("Industry")
+        or account_obj.get("industry")
+        or ""
+    )
     deal_stage = (
         struct_data.get("deal_stage")
         or struct_data.get("StageName")
+        or struct_data.get("stage_name")
+        or struct_data.get("stageName")
         or struct_data.get("stage")
         or ""
     )
     recent_activity = (
         struct_data.get("recent_activity")
         or struct_data.get("NextStep")
+        or struct_data.get("next_step")
+        or struct_data.get("nextStep")
         or struct_data.get("latest_activity")
         or struct_data.get("recent_notes")
         or ""
@@ -1416,10 +1479,12 @@ def _extract_document_record(doc: Any, ds_id: str) -> dict[str, Any]:
         struct_data.get("summary")
         or struct_data.get("content")
         or struct_data.get("Description")
+        or struct_data.get("description")
         or " ".join(s for s in snippets if s)
     )
+    amount = struct_data.get("Amount") or struct_data.get("amount")
     key_metrics = struct_data.get("key_metrics") or (
-        f"Amount: {struct_data['Amount']}" if struct_data.get("Amount") else ""
+        f"Amount: {amount}" if amount else ""
     )
     recommended_architecture = struct_data.get("recommended_architecture", "")
 
