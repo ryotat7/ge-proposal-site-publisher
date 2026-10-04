@@ -1393,3 +1393,205 @@ def test_concierge_instruction_requires_truthful_edit_reports() -> None:
     assert "clean-light" in CONCIERGE_INSTRUCTION
     assert "更新中" in CONCIERGE_INSTRUCTION
     assert "（試算）" in CONCIERGE_INSTRUCTION and "search_internal_knowledge` の結果" in CONCIERGE_INSTRUCTION
+
+
+def test_search_internal_knowledge_federates_drive_and_salesforce_datastores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.agent import _get_datastore_ids, search_internal_knowledge
+
+    # Supports both comma-separated and colon-separated (deploy.sh safe) multi-datastore configs
+    monkeypatch.setenv("AGENT_SEARCH_DATASTORE_ID", "drive-past-rfps-ds:salesforce-crm-ds, drive-past-rfps-ds")
+    assert _get_datastore_ids() == ["drive-past-rfps-ds", "salesforce-crm-ds"]
+
+    def _make_hit(doc_id: str, struct_data: dict[str, Any], derived_data: dict[str, Any]) -> MagicMock:
+        hit = MagicMock()
+        hit.document.id = doc_id
+        hit.document.struct_data = struct_data
+        hit.document.derived_struct_data = derived_data
+        return hit
+
+    drive_hit = _make_hit(
+        "drive-doc-001",
+        {},
+        {
+            "title": "【過去提案書】大手小売グループ様_OMO顧客体験基盤RFP回答書.pdf",
+            "link": "https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/view",
+            "snippets": [
+                {"snippet": "店舗POS・EC・アプリの会員IDを統合し、購買直後のAI接客でリピート率を改善。"}
+            ],
+            "extractive_segments": [
+                {"content": "Phase 1（2ヶ月）でBigQuery統合CDPとAgent Searchを構築し、CVR +28%を達成。"}
+            ],
+        },
+    )
+    sf_hit = _make_hit(
+        "sf-opp-001",
+        {
+            "Name": "株式会社アクメリテール - 次世代OMO・AIコンシェルジュ刷新案件",
+            "AccountName": "株式会社アクメリテール",
+            "Industry": "小売・流通（オムニチャネル）",
+            "StageName": "Proposal/Price Quote（提案・見積提示中）",
+            "NextStep": "来週の経営会議向けに比較表付きインタラクティブWeb提案サイトを提出",
+            "Description": "競合A社とコンペ中。デジタル承認ワークフローとBefore/After比較の明示が必須要件。",
+            "Amount": "48,000,000 JPY",
+        },
+        {},
+    )
+
+    queried_configs: list[str] = []
+
+    class _FakeSearchClient:
+        def search(self, request: Any) -> MagicMock:
+            queried_configs.append(request.serving_config)
+            resp = MagicMock()
+            if "drive-past-rfps-ds" in request.serving_config:
+                resp.results = [drive_hit]
+            elif "salesforce-crm-ds" in request.serving_config:
+                resp.results = [sf_hit]
+            else:
+                resp.results = []
+            return resp
+
+    with patch("google.cloud.discoveryengine_v1.SearchServiceClient", return_value=_FakeSearchClient()):
+        raw = search_internal_knowledge("小売 OMO アクメリテール")
+    res = json.loads(raw)
+
+    assert res["datastore_ids"] == ["drive-past-rfps-ds", "salesforce-crm-ds"]
+    assert len(queried_configs) == 2
+    assert len(res["matched_documents"]) == 2
+
+    by_id = {r["id"]: r for r in res["matched_documents"]}
+    drive_rec = by_id["drive-doc-001"]
+    assert drive_rec["datastore_id"] == "drive-past-rfps-ds"
+    assert drive_rec["source_type"] == "google_drive"
+    assert drive_rec["source_uri"].startswith("https://drive.google.com/")
+    assert "店舗POS・EC・アプリ" in drive_rec["summary"]
+    assert "CVR +28%" in drive_rec["summary"]
+
+    sf_rec = by_id["sf-opp-001"]
+    assert sf_rec["datastore_id"] == "salesforce-crm-ds"
+    assert sf_rec["source_type"] == "salesforce"
+    assert sf_rec["deal_stage"] == "Proposal/Price Quote（提案・見積提示中）"
+    assert "来週の経営会議" in sf_rec["recent_activity"]
+    assert "48,000,000 JPY" in sf_rec["key_metrics"]
+    assert "競合A社とコンペ中" in sf_rec["summary"]
+
+
+def test_seed_datastore_preserves_real_connectors_and_binds_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from google.api_core import exceptions as gcp_exceptions
+
+    sys.path.insert(0, str(ROOT_DIR / "infra"))
+    import seed_datastore  # noqa: E402
+
+    assert seed_datastore.parse_datastore_ids("drive-ds, salesforce-ds:drive-ds") == [
+        "drive-ds",
+        "salesforce-ds",
+    ]
+    assert (
+        seed_datastore.resolve_engine_name("sample-gcp-project", "global", "my-ge-engine")
+        == "projects/sample-gcp-project/locations/global/collections/default_collection/engines/my-ge-engine"
+    )
+    full_engine = "projects/111122223333/locations/global/collections/default_collection/engines/custom-eng"
+    assert seed_datastore.resolve_engine_name("sample-gcp-project", "global", full_engine) == full_engine
+
+    # Simulate an environment where drive-ds already exists (1P Google Drive connector)
+    # and salesforce-ds does not exist yet.
+    existing_stores: set[str] = {"drive-ds"}
+    created_stores: list[str] = []
+    upserted_docs: list[tuple[str, str]] = []
+    engine_state: dict[str, Any] = {"dataStoreIds": ["legacy-ds"]}
+
+    class _FakeDSClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def get_data_store(self, name: str) -> MagicMock:
+            ds_id = name.rsplit("/", 1)[-1]
+            if ds_id not in existing_stores:
+                raise gcp_exceptions.NotFound(f"DataStore {ds_id} not found")
+            return MagicMock()
+
+        def create_data_store(self, parent: str, data_store: Any, data_store_id: str) -> MagicMock:
+            created_stores.append(data_store_id)
+            existing_stores.add(data_store_id)
+            op = MagicMock()
+            op.result.return_value = MagicMock()
+            return op
+
+    class _FakeDocClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def update_document(self, document: Any, allow_missing: bool = False) -> MagicMock:
+            upserted_docs.append((document.name, document.id))
+            return MagicMock()
+
+    class _FakeAuthorizedSession:
+        def __init__(self, credentials: Any) -> None:
+            pass
+
+        def get(self, url: str, headers: dict[str, str] | None = None, timeout: int = 30) -> MagicMock:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.content = json.dumps(engine_state).encode("utf-8")
+            resp.json.return_value = dict(engine_state)
+            return resp
+
+        def patch(
+            self,
+            url: str,
+            headers: dict[str, str] | None = None,
+            json: dict[str, Any] | None = None,
+            timeout: int = 30,
+        ) -> MagicMock:
+            assert json is not None
+            engine_state["dataStoreIds"] = list(json["dataStoreIds"])
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = dict(engine_state)
+            return resp
+
+    backends = _make_fake_backends()
+    monkeypatch.setenv("PROJECT_ID", "sample-gcp-project")
+    monkeypatch.setenv("PROPOSAL_GCS_BUCKET", "test-bucket")
+    monkeypatch.setenv("GE_APP_ID", "my-ge-engine")
+
+    with (
+        patch("google.cloud.storage.Client", side_effect=backends["storage_factory"]),
+        patch("google.cloud.discoveryengine_v1.DataStoreServiceClient", _FakeDSClient),
+        patch("google.cloud.discoveryengine_v1.DocumentServiceClient", _FakeDocClient),
+        patch("google.auth.default", return_value=(MagicMock(), "sample-gcp-project")),
+        patch("google.auth.transport.requests.AuthorizedSession", _FakeAuthorizedSession),
+    ):
+        # 1. SEED_MODE=real: existing drive-ds is preserved untouched; no synthetic docs are upserted
+        monkeypatch.setenv("AGENT_SEARCH_DATASTORE_ID", "drive-ds")
+        monkeypatch.setenv("SEED_MODE", "real")
+        res_real = seed_datastore.seed_knowledge_files()
+        assert res_real["existing_preserved"] == ["drive-ds"]
+        assert res_real["synthetic_seeded"] == []
+        assert upserted_docs == []
+        assert res_real["engine_bound"] is True
+        assert engine_state["dataStoreIds"] == ["legacy-ds", "drive-ds"]
+
+        # 2. SEED_MODE=auto with drive-ds,salesforce-ds: drive-ds is preserved, salesforce-ds is created & seeded with CRM docs
+        monkeypatch.setenv("AGENT_SEARCH_DATASTORE_ID", "drive-ds,salesforce-ds")
+        monkeypatch.setenv("SEED_MODE", "auto")
+        res_auto = seed_datastore.seed_knowledge_files()
+        assert res_auto["existing_preserved"] == ["drive-ds"]
+        assert res_auto["synthetic_seeded"] == ["salesforce-ds"]
+        assert created_stores == ["salesforce-ds"]
+        assert len(upserted_docs) >= 2
+        assert all(doc_id.startswith("crm-") for _, doc_id in upserted_docs)
+        assert engine_state["dataStoreIds"] == ["legacy-ds", "drive-ds", "salesforce-ds"]
+
+        # 3. --bind-only mode only binds DataStores to GE_APP_ID without touching DataStores
+        monkeypatch.setenv("AGENT_SEARCH_DATASTORE_ID", "drive-ds:salesforce-ds:extra-bq-ds")
+        res_bind = seed_datastore.seed_knowledge_files(bind_only=True)
+        assert res_bind["seed_mode"] == "bind_only"
+        assert res_bind["engine_bound"] is True
+        assert engine_state["dataStoreIds"] == ["legacy-ds", "drive-ds", "salesforce-ds", "extra-bq-ds"]
+
+

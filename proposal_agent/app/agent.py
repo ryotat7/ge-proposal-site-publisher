@@ -203,9 +203,26 @@ def _get_hosting_base_url() -> str:
 
 
 def _get_datastore_id() -> str:
-    return os.environ.get(
-        "AGENT_SEARCH_DATASTORE_ID", "proposal-knowledge-datastore"
+    return (
+        os.environ.get("AGENT_SEARCH_DATASTORE_ID")
+        or os.environ.get("AGENT_SEARCH_DATASTORE_IDS")
+        or "proposal-knowledge-datastore"
     )
+
+
+def _get_datastore_ids() -> list[str]:
+    """Parses one or more Agent Search DataStore IDs from AGENT_SEARCH_DATASTORE_ID(S) (comma/colon/semicolon-separated)."""
+    raw = (
+        os.environ.get("AGENT_SEARCH_DATASTORE_IDS")
+        or os.environ.get("AGENT_SEARCH_DATASTORE_ID")
+        or "proposal-knowledge-datastore"
+    )
+    parsed: list[str] = []
+    for token in re.split(r"[,:;|\s]+", raw):
+        cleaned = token.strip()
+        if cleaned and cleaned not in parsed:
+            parsed.append(cleaned)
+    return parsed or ["proposal-knowledge-datastore"]
 
 
 def _get_datastore_location() -> str:
@@ -1295,18 +1312,150 @@ def _edit_deck_with_gemini(
 # ---------------------------------------------------------------------------
 
 
+_SALESFORCE_STRUCT_KEYS = {
+    "StageName",
+    "AccountId",
+    "OpportunityId",
+    "NextStep",
+    "Amount",
+    "CloseDate",
+    "AccountName",
+}
+
+
+def _infer_source_type(
+    ds_id: str,
+    struct_data: dict[str, Any],
+    derived_data: dict[str, Any],
+    source_uri: str,
+) -> str:
+    explicit = (
+        struct_data.get("source_system")
+        or struct_data.get("source_type")
+        or derived_data.get("source_type")
+    )
+    if explicit:
+        return str(explicit).strip().lower()
+    ds_lower = ds_id.lower()
+    uri_lower = source_uri.lower()
+    if (
+        "drive" in ds_lower
+        or "docs.google.com" in uri_lower
+        or "drive.google.com" in uri_lower
+    ):
+        return "google_drive"
+    if (
+        "salesforce" in ds_lower
+        or "sfdc" in ds_lower
+        or "crm" in ds_lower
+        or "salesforce.com" in uri_lower
+        or any(k in struct_data for k in _SALESFORCE_STRUCT_KEYS)
+    ):
+        return "salesforce"
+    return "knowledge"
+
+
+def _extract_document_record(doc: Any, ds_id: str) -> dict[str, Any]:
+    struct_data = dict(doc.struct_data) if getattr(doc, "struct_data", None) else {}
+    derived_data = (
+        dict(doc.derived_struct_data)
+        if getattr(doc, "derived_struct_data", None)
+        else {}
+    )
+    snippets: list[str] = []
+    for item in derived_data.get("snippets") or []:
+        if isinstance(item, dict) and item.get("snippet"):
+            snippets.append(str(item["snippet"]).strip())
+    for item in derived_data.get("extractive_answers") or []:
+        if isinstance(item, dict) and item.get("content"):
+            snippets.append(str(item["content"]).strip())
+    for item in derived_data.get("extractive_segments") or []:
+        if isinstance(item, dict) and item.get("content"):
+            snippets.append(str(item["content"]).strip())
+
+    source_uri = str(
+        struct_data.get("source_uri")
+        or struct_data.get("uri")
+        or struct_data.get("link")
+        or derived_data.get("link")
+        or derived_data.get("uri")
+        or getattr(doc, "uri", "")
+        or ""
+    )
+    source_type = _infer_source_type(ds_id, struct_data, derived_data, source_uri)
+
+    doc_id = str(getattr(doc, "id", "") or "")
+    title = (
+        struct_data.get("title")
+        or struct_data.get("Name")
+        or struct_data.get("Subject")
+        or derived_data.get("title")
+        or doc_id
+    )
+    client_name = (
+        struct_data.get("client_name")
+        or struct_data.get("AccountName")
+        or struct_data.get("account_name")
+        or ""
+    )
+    industry = struct_data.get("industry") or struct_data.get("Industry") or ""
+    deal_stage = (
+        struct_data.get("deal_stage")
+        or struct_data.get("StageName")
+        or struct_data.get("stage")
+        or ""
+    )
+    recent_activity = (
+        struct_data.get("recent_activity")
+        or struct_data.get("NextStep")
+        or struct_data.get("latest_activity")
+        or struct_data.get("recent_notes")
+        or ""
+    )
+    summary = (
+        struct_data.get("summary")
+        or struct_data.get("content")
+        or struct_data.get("Description")
+        or " ".join(s for s in snippets if s)
+    )
+    key_metrics = struct_data.get("key_metrics") or (
+        f"Amount: {struct_data['Amount']}" if struct_data.get("Amount") else ""
+    )
+    recommended_architecture = struct_data.get("recommended_architecture", "")
+
+    return {
+        "id": doc_id,
+        "datastore_id": ds_id,
+        "source_type": source_type,
+        "source_uri": source_uri,
+        "title": str(title),
+        "client_name": str(client_name),
+        "industry": str(industry),
+        "summary": str(summary),
+        "key_metrics": str(key_metrics),
+        "recommended_architecture": str(recommended_architecture),
+        "deal_stage": str(deal_stage),
+        "recent_activity": str(recent_activity),
+    }
+
+
 def search_internal_knowledge(query: str) -> str:
-    """Searches internal Agent Search datastore for past proposals, RFPs, case studies, and CRM context.
+    """Searches internal Agent Search datastore(s) for past proposals, RFPs, case studies, and CRM context.
+
+    Supports both single and comma/colon-separated multiple DataStore IDs in `AGENT_SEARCH_DATASTORE_ID`
+    (e.g., a Google Drive 1st Party DataConnector DataStore for past RFPs/case studies plus a Salesforce
+    1st Party DataConnector DataStore for live CRM opportunities and stakeholder notes).
 
     Args:
         query: Search keywords (such as client name, industry, UX/CDP/AI theme, or RFP requirements).
 
     Returns:
-        JSON string containing matched internal documents, snippets, and structured metadata.
+        JSON string containing matched internal documents, snippets, source types, and structured metadata.
     """
     project_id = _get_project_id()
     location = _get_datastore_location()
     datastore_id = _get_datastore_id()
+    datastore_ids = _get_datastore_ids()
 
     results_list: list[dict[str, Any]] = []
     try:
@@ -1323,56 +1472,41 @@ def search_internal_knowledge(query: str) -> str:
             quota_project_id=project_id,
         )
         client = discoveryengine.SearchServiceClient(client_options=client_options)
-        serving_config = (
-            f"projects/{project_id}/locations/{location}/collections/"
-            f"default_collection/dataStores/{datastore_id}/servingConfigs/default_search"
-        )
-        request = discoveryengine.SearchRequest(
-            serving_config=serving_config,
-            query=query,
-            page_size=5,
-            content_search_spec=discoveryengine.SearchRequest.ContentSearchSpec(
-                snippet_spec=discoveryengine.SearchRequest.ContentSearchSpec.SnippetSpec(
-                    return_snippet=True
-                ),
-            ),
-        )
-        response = client.search(request)
-        for result in response.results:
-            doc = result.document
-            struct_data = dict(doc.struct_data) if doc.struct_data else {}
-            derived_data = (
-                dict(doc.derived_struct_data) if doc.derived_struct_data else {}
+        for ds_id in datastore_ids:
+            serving_config = (
+                f"projects/{project_id}/locations/{location}/collections/"
+                f"default_collection/dataStores/{ds_id}/servingConfigs/default_search"
             )
-            snippets = []
-            if "snippets" in derived_data:
-                for s in derived_data["snippets"]:
-                    if isinstance(s, dict) and s.get("snippet"):
-                        snippets.append(s["snippet"])
-            results_list.append(
-                {
-                    "id": doc.id,
-                    "title": struct_data.get("title")
-                    or derived_data.get("title")
-                    or doc.id,
-                    "client_name": struct_data.get("client_name", ""),
-                    "industry": struct_data.get("industry", ""),
-                    "summary": struct_data.get("summary")
-                    or struct_data.get("content")
-                    or " ".join(snippets),
-                    "key_metrics": struct_data.get("key_metrics", ""),
-                    "recommended_architecture": struct_data.get(
-                        "recommended_architecture", ""
+            request = discoveryengine.SearchRequest(
+                serving_config=serving_config,
+                query=query,
+                page_size=5,
+                content_search_spec=discoveryengine.SearchRequest.ContentSearchSpec(
+                    snippet_spec=discoveryengine.SearchRequest.ContentSearchSpec.SnippetSpec(
+                        return_snippet=True
                     ),
-                }
+                ),
             )
+            try:
+                response = client.search(request)
+                for result in response.results:
+                    results_list.append(_extract_document_record(result.document, ds_id))
+            except Exception as ds_exc:
+                logger.warning(
+                    "Agent Search query failed for datastore %s: %s", ds_id, ds_exc
+                )
     except Exception as exc:
         logger.warning("Agent Search query fallback triggered: %s", exc)
 
     if not results_list:
+        primary_ds = datastore_ids[0] if datastore_ids else datastore_id
+        crm_ds = datastore_ids[1] if len(datastore_ids) > 1 else primary_ds
         results_list = [
             {
                 "id": "sample-case-retail-cdp-ai-001",
+                "datastore_id": primary_ds,
+                "source_type": "google_drive",
+                "source_uri": "https://drive.google.com/drive/folders/sample-rfp-archive",
                 "title": f"{_get_brand_name()} 標準実績：大手リテール・商業施設向け AIコンシェルジュ＆統合データ基盤提案",
                 "client_name": query,
                 "industry": "リテール・流通・金融・B2Bサービス",
@@ -1388,12 +1522,36 @@ def search_internal_knowledge(query: str) -> str:
                     "Layer 3: AIエージェント基盤(Agent Runtime / Gemini Enterprise / Agent Search) -> "
                     "Layer 4: 統合データ基盤(BigQuery / Cloud Storage / Firestore)"
                 ),
-            }
+                "deal_stage": "Closed Won (Reference Case)",
+                "recent_activity": "Google ドライブの過去RFP・提案実績アーカイブより抽出",
+            },
+            {
+                "id": "sample-crm-opportunity-context-002",
+                "datastore_id": crm_ds,
+                "source_type": "salesforce",
+                "source_uri": "https://example.my.salesforce.com/lightning/r/Opportunity/006000000000001AAA/view",
+                "title": f"Salesforce 商談履歴：{query} 様向け 次世代デジタル体験・AI活用基盤プロジェクト",
+                "client_name": query,
+                "industry": "リテール・流通・金融・B2Bサービス",
+                "summary": (
+                    "最新商談メモ：先方事業部門・DX推進室とのヒアリングにて、既存チャネルのデータ分断解消と"
+                    "段階的なパイロット導入（6ヶ月ロードマップ）を重視していることを確認。セキュリティ要件として"
+                    "外部共有資料への個別ID/パスワード認証が必須。"
+                ),
+                "key_metrics": "想定初期導入期間: 6ヶ月（Phase 1〜3）、目標リピートCVR改善: +25%〜+30%",
+                "recommended_architecture": (
+                    "Google ドライブ(過去RFP・実績集) + Salesforce(最新商談経緯) -> Agent Search -> "
+                    "Agent Runtime (ADK Concierge) -> Cloud Run 認証ゲートウェイ + 非公開 Cloud Storage + Firestore"
+                ),
+                "deal_stage": "02 - Tech Eval / Solution Proposal",
+                "recent_activity": "次回役員プレゼン向けに、システム構成図と導入ステップを含むインタラクティブHTML提案サイトの提示を合意",
+            },
         ]
 
     return json.dumps(
         {
             "datastore_id": datastore_id,
+            "datastore_ids": datastore_ids,
             "project_id": project_id,
             "query": query,
             "matched_documents": results_list,
