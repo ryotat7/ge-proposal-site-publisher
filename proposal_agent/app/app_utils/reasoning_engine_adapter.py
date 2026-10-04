@@ -12,7 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Serve the reasoning_engine ``{class_method, input}`` contract over HTTP."""
+"""Serve the reasoning_engine ``{class_method, input}`` contract over HTTP.
+
+Exists to guarantee support for the Agent Platform Console Playground and Gemini
+Enterprise (via ADK registration), which both invoke the engine through this
+contract. Agent Runtime forwards calls to ``/api/reasoning_engine`` (sync) and
+``/api/stream_reasoning_engine`` (streaming); dispatch is limited to the
+:class:`AdkApp` ``register_operations()`` methods so the wire output matches a
+packaged Agent Runtime.
+"""
 
 import inspect
 import json
@@ -39,6 +47,8 @@ def attach_reasoning_engine_routes(app: FastAPI) -> None:
         if runtime is None:
             from app.agent import app as adk_app
 
+            # Reuse the process-wide services so sessions created here are
+            # visible to the adk_api and A2A paths, and vice versa (see services.py).
             runtime = AdkApp(
                 app=adk_app,
                 session_service_builder=services.get_session_service,

@@ -1,0 +1,4 @@
+# Copied from proposal_agent/app by infra/deploy.sh (single source of truth lives there).
+deck_contract.py
+deck_runtime/
+__pycache__/

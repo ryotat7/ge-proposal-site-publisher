@@ -6,12 +6,15 @@ description: >-
   grid, As-Is/To-Be comparison matrix, 4-layer architecture flow, 3-phase
   roadmap timeline, and ROI action matrix), Tailwind CSS, GSAP animations, and
   keyboard/button navigation. Use when synthesizing or editing client proposal
-  presentation websites via Managed Agents API or ADK tools.
+  presentation websites in template mode (design_mode=template, the fast mode
+  and fallback). Free-form decks use freeform-deck-designer instead.
 ---
 
 # Interactive Slide Designer Skill
 
 Produces executive-grade, single-file interactive HTML5 slide decks (`index.html`) tailored to each client's industry, visual tone, and strategic narrative.
+
+> **Scope:** This skill covers the template pipeline only (`design_mode=template`: the 高速モード, and the fallback when no free-form build is publishable). Free-form decks (`design_mode=freeform`, the default) follow `app/skills/freeform-deck-designer/SKILL.md` and the output contract in `app/deck_contract.py`.
 
 ## 1. Non-Negotiable Structural Contract
 
@@ -47,3 +50,15 @@ Never repeat the same 3-column card grid on every slide. Assign a distinct layou
 | **Slide 06** | `5` | `roi-and-next-steps` | Two-column Impact & Action Matrix: quantitative ROI metric banners + qualitative benefits on the left, numbered immediate action plan on the right. |
 
 See [references/design_patterns.md](references/design_patterns.md) for theme color palettes (`sky`, `emerald`, `violet`, `amber`, `rose`) and HTML/CSS snippets.
+
+## 3. Creation & Editing Workflow
+
+- **New Deck Creation**:
+  1. Ground the storyline using internal knowledge search results and user consultation notes.
+  2. Select the accent theme (`sky`, `emerald`, `violet`, `amber`, `rose`) matching the client's brand or request.
+  3. Generate the 6-slide HTML5 document adhering to the 6 `data-layout` archetypes.
+  4. Validate with `python3 scripts/validate_slide_deck.py <path_to_index.html>`.
+- **Live Deck Editing**:
+  1. Load the existing `index.html` and structured `deck_spec` metadata.
+  2. Apply the user's natural-language modifications (title, copy, KPIs, roadmap items, or `theme_color`) while preserving all 6 slides (`data-slide-index="0"`..`"5"`) and navigation scripts.
+  3. Re-run `validate_slide_deck.py` before uploading back to Cloud Storage.

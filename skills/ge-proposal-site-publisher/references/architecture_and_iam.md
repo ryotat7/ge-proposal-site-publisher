@@ -7,72 +7,88 @@ Each published presentation is stored at `presentations/<presentation_id>`:
 | Field | Type | Description |
 | :--- | :--- | :--- |
 | `presentation_id` | `string` | Unique identifier (`prop-YYYYMMDD-<8hex>`) |
-| `client_name` | `string` | Target client organization name |
-| `proposal_title` | `string` | Presentation main title |
-| `subtitle` | `string` | Executive subtitle / value proposition |
-| `theme_color` | `string` | Accent palette (`sky`, `emerald`, `violet`, `amber`, `rose`) |
-| `viewer_id` | `string` | Generated login ID for external client viewers |
-| `password_hash` | `string` | Hex-encoded PBKDF2-HMAC-SHA256 digest (120,000 iterations) |
-| `password_salt` | `string` | Hex-encoded 16-byte random salt |
-| `gcs_bucket` | `string` | Private Cloud Storage bucket name |
-| `gcs_blob_path` | `string` | `presentations/<presentation_id>/index.html` |
-| `deck_spec` | `map` | Full serialized `PresentationDeckSpec` for live re-editing |
-| `status` | `string` | `"active"` or `"revoked"` |
-| `is_active` | `boolean` | `true` when active, `false` when revoked |
-| `created_at` | `string` | ISO-8601 UTC timestamp |
-| `updated_at` | `string` | ISO-8601 UTC timestamp |
-| `expires_at` | `string` | ISO-8601 UTC expiration timestamp |
-| `generation_status` | `string` | `"generating"` → `"ready"` (or `"failed"`) — drives the gateway's 'generating' page |
-| `generation_phase` | `string` | `queued` / `knowledge_search` / `managed_agents` / `gemini_fast` / `deterministic` / `rendering` / `ready` |
-| `generation_detail` | `string` | Free-text progress detail (e.g. interaction id, elapsed seconds) |
-| `generation_engine` | `string` | Engine that produced the deck: `managed_agents_api:<model>`, `agent_platform_gemini_with_skill:<model>`, `deterministic_skill_template[:reason]`, `state_deck_spec` |
+| `client_name` / `proposal_title` / `subtitle` | `string` | Client and headline metadata |
+| `design_mode` | `string` | `freeform` (ADK designer, default) or `template` (6-slide fast mode) — what the user asked for |
+| `render_mode` | `string` | What is currently published: `freeform` or `template` (a free-form request can fall back to `template`) |
+| `theme_color` / `design_style` | `string` | Template accent (`sky`, `emerald`, `violet`, `amber`, `rose`) and look (`immersive-dark`, `clean-light`, `editorial-light`) |
+| `viewer_id` | `string` | Generated login ID for external viewers |
+| `password_hash` / `password_salt` | `string` | PBKDF2-HMAC-SHA256 digest (120,000 iterations) and 16-byte salt, hex-encoded |
+| `gcs_bucket` / `gcs_blob_path` | `string` | Private bucket and the published `index.html` (`presentations/<id>/index.html` or `presentations/<id>/v<N>/index.html`) |
+| `deck_spec` / `previous_deck_spec` | `map` | Template decks: current `PresentationDeckSpec` and the spec before the last edit (undo) |
+| `status` / `is_active` | `string` / `boolean` | `"active"` or `"revoked"` |
+| `created_at` / `updated_at` / `expires_at` | `string` | ISO-8601 UTC timestamps |
+| `generation_status` | `string` | `generating` → `ready` (or `failed`); `updating` while an edit is in progress — drives the gateway's generating page and 「更新中」 banner |
+| `generation_phase` | `string` | `queued` / `knowledge_search` / `freeform_staging` / `freeform_drafting` / `freeform_images` / `freeform_checking` / `freeform_reviewing` / `freeform_publishing` / `freeform_fallback` / `deterministic_template` / `rendering` / `freeform_edit_queued` / `edit_queued` / `edit_designing` / `edit_rendering` / `edit_publishing` / `ready` / `failed` |
+| `generation_engine` | `string` | `adk_freeform:<model>`, `agent_platform_gemini_with_skill:<model>`, `deterministic_skill_template[:reason]`, `state_deck_spec`; a template fallback after a free-form attempt is tagged `+freeform_fallback:<reason>` |
 | `generation_engine_label` | `string` | Human-readable Japanese label of `generation_engine` |
-| `generation_requested_at` / `ready_at` | `string` | ISO-8601 UTC timestamps of the request and completion |
-| `generation_elapsed_seconds` | `number` | Wall-clock generation time |
-| `generation_dispatch` | `string` | `cloud_run_job` / `inline_thread` / `sync` — how the background work was started |
-| `generation_execution` | `string` | Cloud Run job execution name (when dispatched to the job) |
-| `generation_inputs` | `map` | `client_name`, `proposal_title`, `proposal_brief`, `theme_color`, `outline_hint`, `expiration_days` consumed by the worker |
+| `generation_dispatch` / `generation_execution` | `string` | `cloud_run_job` / `inline_thread` / `sync`, and the Cloud Run job execution name |
+| `generation_inputs` | `map` | Inputs consumed by the worker (`client_name`, `proposal_title`, `proposal_brief`, `theme_color`, `outline_hint`, design request, …) |
 | `generation_error` | `string` | Last error message when `generation_status="failed"` |
+| `content_version` | `number` | Incremented on every publication (first deck = 1); the gateway watcher reloads open tabs when it increases |
+| `freeform_prefix` | `string` | Published free-form prefix (`presentations/<id>/v<N>/`) |
+| `freeform` | `map` | Current free-form version: `current_version`, `prefix`, `session_id`, `review_rounds`, `layout_errors`, `grounding_issues`, `warnings`, `ai_images`, `usage` (tokens), `qa_screenshots` (`gs://…/_qa/`), `model`, `elapsed_seconds` |
+| `freeform_versions` | `array<map>` | Last 10 versions: `version`, `prefix`, `created_at`, `slide_count`, `based_on`, `based_on_render_mode` — undo switches back to `based_on` |
+| `last_edit_result` | `map` | `status` (`applied` / `no_change` / `failed`), `edit_engine`, `verified_changes`, `unsupported_requests`, `content_version`, `applied_at` |
 
 ### Subcollection: `presentations/<presentation_id>/access_logs`
 
-Each successful viewer authentication appends a document containing:
-- `accessed_at` (ISO-8601 UTC timestamp)
-- `viewer_id` (`string`)
-- `auth_method` (`"basic_auth"` or `"session_cookie"`)
-- `ip_address` (`string`)
-- `user_agent` (`string`)
+Each successful viewer authentication appends `accessed_at`, `viewer_id`, `auth_method` (`"basic_auth"` or `"session_cookie"`; a browser that signed in through the login form is logged as `"session_cookie"` on its next page load), `ip_address` and `user_agent`.
+
+### Cloud Storage layout (private bucket)
+
+| Prefix | Written by | Content |
+| :--- | :--- | :--- |
+| `knowledge/` | `infra/seed_datastore.py` | Synthetic RFP / case-study markdown |
+| `staging/<id>/<run_id>/input/` | worker | `brief.md`, `knowledge.md` (read-only for the designer) |
+| `staging/<id>/<run_id>/deck/` | ADK designer agent | `index.html`, `assets/**`, `charts/*.json`, `manifest.json` |
+| `presentations/<id>/v<N>/` | worker | Published free-form version + `_qa/` screenshots |
+| `presentations/<id>/index.html` | agent / worker | Published template deck (`versions/` keeps backups before edits) |
 
 ## 2. Required IAM Roles
 
-Grant the following roles to both the Compute Engine default service account (`<PROJECT_NUMBER>-compute@developer.gserviceaccount.com`) and the Agent Runtime Reasoning Engine service agent (`service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`):
+`infra/deploy.sh` grants the following roles to both the Compute Engine default service account (`<PROJECT_NUMBER>-compute@developer.gserviceaccount.com`, which runs the generation job, the deck renderer and the hosting gateway) and the Agent Runtime service agent (`service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`):
 
-- `roles/storage.objectAdmin` on `gs://<PROPOSAL_GCS_BUCKET>` (Bucket-level)
-- `roles/datastore.user` (Project-level, for Firestore read/write)
-- `roles/discoveryengine.viewer` (Project-level, for Agent Search grounding)
-- `roles/aiplatform.user` (Project-level, for Agent Platform Gemini / Managed Agents API calls)
-- `roles/serviceusage.serviceUsageConsumer` (Project-level, for quota project checks)
-- `roles/run.developer` (Project-level, for `run.jobs.run` / `run.jobs.runWithOverrides` — the agent triggers the generation job with a per-execution `PRESENTATION_ID` override; `roles/run.invoker` alone is **not** sufficient)
-- `roles/iam.serviceAccountUser` on the Compute Engine default service account, granted to the Reasoning Engine service agent (the job runs as the compute SA, so the trigger needs `actAs`)
+| Role | Scope | Why |
+| :--- | :--- | :--- |
+| `roles/storage.objectAdmin` | `gs://<PROPOSAL_GCS_BUCKET>` | Staging, publishing, versions, screenshots; the gateway and renderer read decks |
+| `roles/datastore.user` | Project | Firestore read/write (credentials, status, versions, access logs) |
+| `roles/discoveryengine.viewer` | Project | Agent Search grounding |
+| `roles/aiplatform.user` | Project | `gemini-3.8-flash` (concierge, ADK designer, template path) and `gemini-3.1-flash-image` on Gemini Enterprise Agent Platform |
+| `roles/serviceusage.serviceUsageConsumer` | Project | Quota project checks |
+| `roles/run.developer` | Project | `run.jobs.runWithOverrides` — the agent starts the job with per-execution `PRESENTATION_ID` / `JOB_MODE` overrides (`roles/run.invoker` alone is not enough) |
 
-## 2a. Workloads & Environment Variables
+Additional bindings:
+
+- `roles/iam.serviceAccountUser` on the compute service account, granted to the Agent Runtime service agent (the job runs as the compute SA, so triggering it needs `actAs`).
+- `roles/run.invoker` on the `proposal-deck-renderer` service, granted to the compute service account. The renderer is deployed with `--no-allow-unauthenticated`; the job calls it with an ID token, and the renderer only reads prefixes in `ALLOWED_BUCKETS`.
+- The hosting gateway is deployed with `--allow-unauthenticated` because external viewers have no Google account; authentication happens in the application (per-deal viewer ID/password, HMAC session cookie).
+
+If you run the workloads under dedicated service accounts instead of the compute default, give the job SA the bucket, Firestore, Agent Search and `aiplatform.user` roles plus `run.invoker` on the renderer; the renderer SA `storage.objectViewer` on the bucket; the gateway SA `storage.objectViewer` on the bucket and `datastore.user`; and the Agent Runtime service agent `run.developer` plus `iam.serviceAccountUser` on the job SA.
+
+## 3. Workloads & Environment Variables
 
 | Workload | Entry point | Key environment variables |
 | :--- | :--- | :--- |
-| Agent Runtime (Reasoning Engine) | `app/agent.py` (`root_agent`) | `GEMINI_MODEL`, `MANAGED_AGENT_MODEL`, `MANAGED_AGENT_DEADLINE_SECONDS`, `GENERATION_JOB_NAME` (`projects/<p>/locations/<r>/jobs/<job>`), `GENERATION_TRIGGER_MODE` (`auto` \| `cloud_run_job` \| `inline_thread` \| `sync` \| `none`), `GENERATION_STALE_MINUTES` (default 13), `HOSTING_BASE_URL`, `PROPOSAL_GCS_BUCKET`, `PROPOSAL_FIRESTORE_COLLECTION`, `AGENT_SEARCH_DATASTORE_ID` |
-| Cloud Run job (`proposal-deck-generator`) | `uv run --no-sync python -m app.generation_worker` (reads `PRESENTATION_ID`) | Same model / storage variables as the agent; `--task-timeout=1500s`, `--max-retries=1`, runs as the compute SA |
-| Cloud Run service (hosting gateway) | `hosting_gateway/main.py` | `PROPOSAL_GCS_BUCKET`, `PROPOSAL_FIRESTORE_COLLECTION`, `GATEWAY_SESSION_SECRET`, `PROPOSAL_COOKIE_PREFIX`, `PROPOSAL_BRAND_NAME`, `PROPOSAL_BRAND_BADGE` |
+| Agent Runtime (concierge) | `proposal_agent/app/agent.py` (`root_agent`) | `GEMINI_MODEL` (`gemini-3.8-flash`), `GENAI_LOCATION` (`global`), `GENERATION_JOB_NAME` (`projects/<p>/locations/<r>/jobs/<job>`), `GENERATION_TRIGGER_MODE` (`auto` \| `cloud_run_job` \| `inline_thread` \| `sync` \| `none`), `GENERATION_STALE_MINUTES` (13), `FREEFORM_GENERATION_STALE_MINUTES` (22), `FREEFORM_EDIT_STALE_SECONDS` (1500), `EDIT_STALE_SECONDS` (300), `ENABLE_LLM_DECK_EDIT` (`true`), `FREEFORM_DESIGN_ENABLED`, `HOSTING_BASE_URL`, `PROPOSAL_GCS_BUCKET`, `PROPOSAL_FIRESTORE_COLLECTION`, `AGENT_SEARCH_DATASTORE_ID`, `PROPOSAL_BRAND_NAME`, `PROPOSAL_BRAND_BADGE` |
+| Cloud Run job (`proposal-deck-generator`) | `uv run --no-sync python -m app.generation_worker` (reads `PRESENTATION_ID`, `JOB_MODE`=`generate` \| `freeform_edit`) | Storage/model variables as above, plus `FREEFORM_DESIGN_ENABLED` (`true`), `FREEFORM_ADK_MODEL` (`gemini-3.8-flash`), `FREEFORM_ADK_MAX_LLM_CALLS` (120), `DECK_RENDERER_URL` (empty = skip review rounds), `IMAGE_MODEL` (`gemini-3.1-flash-image`), `FREEFORM_TOTAL_BUDGET_SECONDS` (900), `FREEFORM_REVIEW_ROUNDS` (2); `--task-timeout=1500s`, `--memory=2Gi`, `--max-retries=1` |
+| Cloud Run service (deck renderer) | `deck_renderer/main.py` (`POST /v1/render`, `GET /health`) | `ALLOWED_BUCKETS`, `CHROME_BIN`; `--concurrency=1`, `--cpu=2`, `--memory=2Gi`, `--no-allow-unauthenticated` |
+| Cloud Run service (hosting gateway) | `hosting_gateway/main.py` | `PROPOSAL_GCS_BUCKET`, `PROPOSAL_FIRESTORE_COLLECTION`, `GATEWAY_SESSION_SECRET`, `PROPOSAL_COOKIE_PREFIX`, `PROPOSAL_BRAND_NAME`, `PROPOSAL_BRAND_BADGE`, `LIVE_UPDATE_WATCHER` (`true`), `LIVE_UPDATE_POLL_SECONDS` (5), `UPDATING_STALE_SECONDS` (300), `FREEFORM_UPDATING_STALE_SECONDS` (1500), `DECK_RUNTIME_DIR` |
 
 ### Gateway endpoints
 
 | Endpoint | Auth | Behaviour |
 | :--- | :--- | :--- |
-| `GET /p/{id}` | Basic auth or session cookie | `generating` → branded interim page (HTTP 200, polls `/status`); `failed` → HTTP 503; `ready` → streams `presentations/{id}/index.html` from private GCS; revoked/expired → HTTP 403 |
-| `GET /p/{id}/status` | Basic auth or session cookie | JSON (`generation_status`, `generation_phase`, `generation_detail`, `generation_engine`, `generation_engine_label`, `ready_at`, …), `Cache-Control: no-store, private` |
+| `GET /p/{id}/` (free-form) · `GET /p/{id}` (template) | Basic auth, login form or session cookie | `generating` → branded interim page that polls `/status`; `updating` → current version with the 「更新中」 banner; `failed` → HTTP 503; `ready` → streams the deck from private GCS; revoked/expired → HTTP 403. The other URL form answers with 307 to the canonical one. Free-form HTML is served with a per-request nonce CSP. |
+| `GET /p/{id}/assets/{path}` · `GET /p/{id}/charts/{path}` | Same as above | Free-form assets and ECharts option JSON (allow-listed paths only) |
+| `GET /_rt/v1/{name}` | none | Shared deck runtime (`deck-runtime.css`, `deck-runtime.js`, `echarts.min.js`) |
+| `GET /p/{id}/status` | Basic auth or session cookie | JSON (`generation_status`, `generation_phase`, `content_version`, `render_mode`, `design_mode`, `edit_mode`, `last_edit_status`, `generation_engine_label`, `ready_at`, …), `Cache-Control: no-store, private`; never exposes `verified_changes` |
 | `POST /p/{id}/auth` | Login form | Verifies PBKDF2 credentials and sets the HMAC session cookie |
 | `GET /health` | none | Liveness (`/healthz` is reserved by the Google Frontend on `*.run.app`) |
 
-## 3. Custom Domain Options
+## 4. Gemini Enterprise Registration
 
-The Cloud Run Hosting Gateway serves `https://<gateway>/p/<presentation_id>` directly over managed HTTPS (`*.run.app`) and supports custom domain mapping via Cloud Run Custom Domain Mapping or Cloud Load Balancing with Google-managed SSL certificates.
+Register once with `agents-cli publish gemini-enterprise --gemini-enterprise-app-id=projects/<project-number>/locations/global/collections/default_collection/engines/<engine-id>` (phase 8 of `infra/deploy.sh` when `GE_APP_ID` is set). The registration points at the Agent Runtime resource, so later `agents-cli deploy` runs update the live agent without re-publishing. Each publish call creates a new registration; update the description of an existing one with `PATCH https://discoveryengine.googleapis.com/v1alpha/<agent-name>?updateMask=description,adkAgentDefinition.toolSettings.toolDescription`.
 
+## 5. Custom Domain Options
+
+The hosting gateway serves `https://<gateway>/p/<presentation_id>/` over managed HTTPS (`*.run.app`) and supports custom domains via Cloud Run domain mapping or Cloud Load Balancing with Google-managed certificates. Pass the public host to `infra/deploy.sh` as `HOSTING_BASE_URL` so share URLs use it.

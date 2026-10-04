@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import datetime
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -28,15 +29,15 @@ from fastapi.testclient import TestClient
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR / "proposal_agent"))
-sys.path.insert(0, str(ROOT_DIR))
+sys.path.insert(0, str(ROOT_DIR / "hosting_gateway"))
 
 from app.agent import (  # noqa: E402
     ArchitectureNode,
     ChallengeItem,
-    create_proposal_website,
     CxHighlight,
     PresentationDeckSpec,
     RoadmapPhase,
+    create_proposal_website,
     delete_proposal_website,
     edit_proposal_website,
     get_proposal_access_logs,
@@ -50,7 +51,7 @@ from app.agent import (  # noqa: E402
     validate_rendered_html,
     verify_password,
 )
-from hosting_gateway import main as gateway_main  # noqa: E402
+import main as gateway_main  # noqa: E402
 
 
 def _sample_deck_spec(theme_color: str = "sky") -> PresentationDeckSpec:
@@ -131,14 +132,14 @@ def _sample_deck_spec(theme_color: str = "sky") -> PresentationDeckSpec:
         ],
         roadmap_phases=[
             RoadmapPhase(
-                phase_name="Phase 1: データ統合・PoC検証",
+                phase_name="Phase 1: データ統合・実証検証",
                 period="Month 1 - 2",
                 deliverables=[
                     "カスタマージャーニー設計と優先ユースケース定義",
                     "BigQuery CDPへの初期データ連携とAgent Search構築",
                     "AIエージェントのプロトタイプ実装・社内検証",
                 ],
-                milestone="プロトタイプ合意・PoC効果測定完了",
+                milestone="プロトタイプ合意・実証効果の測定完了",
             ),
             RoadmapPhase(
                 phase_name="Phase 2: パイロット導入・OMO連携",
@@ -331,53 +332,85 @@ def test_full_lifecycle_create_edit_list_logs_credentials_and_delete() -> None:
         patch("google.cloud.firestore.Client", side_effect=_make_mock_firestore_client),
         patch.dict("os.environ", {"ENABLE_LLM_DECK_EDIT": "false"}),
     ):
+        # 1. Create / publish
         created = publish_presentation(mock_ctx)
         pres_id = created["presentation_id"]
         assert created["status"] == "PUBLISHED"
         assert mock_ctx.state["published_result"]["presentation_id"] == pres_id
         assert mock_ctx.state["published_presentation"]["presentation_id"] == pres_id
-        assert len(created["slide_outline"]) == 6
+        assert firestore_store[pres_id]["status"] == "active"
+        assert firestore_store[pres_id]["is_active"] is True
 
-        edited = edit_proposal_website(
-            presentation_id=pres_id,
-            edit_instructions="テーマをemeraldに変更",
-            new_title="【改訂版】次世代OMO顧客体験変革のご提案",
-            new_theme_color="emerald",
-            tool_context=mock_ctx,
-        )
-        assert edited["status"] == "UPDATED"
-        assert edited["existing_html_loaded"] is True
-        assert edited["theme_color"] == "emerald"
-        assert edited["proposal_title"] == "【改訂版】次世代OMO顧客体験変革のご提案"
-
-        listed = list_proposal_websites(client_filter="アクメ")
-        assert listed["count"] == 1
-
+        # Seed a simulated access log
         access_logs_store[pres_id] = [
             {
                 "accessed_at": "2026-10-03T04:00:00+00:00",
                 "viewer_id": created["viewer_id"],
                 "auth_method": "basic_auth",
                 "ip_address": "203.0.113.10",
-                "user_agent": "pytest",
+                "user_agent": "Mozilla/5.0",
             }
         ]
-        logs = get_proposal_access_logs(pres_id)
-        assert logs["total_access_count"] == 1
 
-        rotated = manage_proposal_credentials(
+        # 2. Edit presentation (change title, theme color to emerald, and callout)
+        edited = edit_proposal_website(
+            presentation_id=pres_id,
+            edit_instructions="テーマカラーをemeraldに変更し、タイトルを改訂版に更新",
+            new_title="【改訂版】AIエージェント×統合CDPによるOMO顧客体験変革",
+            new_theme_color="emerald",
+            new_custom_callout="経営会議フィードバック反映済み",
+            tool_context=mock_ctx,
+        )
+        assert edited["status"] == "UPDATED"
+        assert edited["existing_html_loaded"] is True
+        assert edited["theme_color"] == "emerald"
+        assert "【改訂版】" in edited["proposal_title"]
+        blob_key = next(iter(gcs_store.keys()))
+        updated_html = gcs_store[blob_key].decode("utf-8")
+        assert validate_rendered_html(updated_html) is True
+        assert 'data-theme="emerald"' in updated_html
+        assert "【改訂版】AIエージェント×統合CDPによるOMO顧客体験変革" in updated_html
+        assert "経営会議フィードバック反映済み" in updated_html
+
+        # 3. List presentations
+        listed = list_proposal_websites(client_filter="アクメ")
+        assert listed["count"] == 1
+        assert listed["presentations"][0]["presentation_id"] == pres_id
+        assert listed["presentations"][0]["access_log_count"] == 1
+
+        # 4. Get access logs
+        logs_res = get_proposal_access_logs(pres_id)
+        assert logs_res["total_access_count"] == 1
+        assert logs_res["access_logs"][0]["auth_method"] == "basic_auth"
+
+        # 5. Rotate credentials & extend expiration
+        old_pw = created["viewer_password"]
+        cred_res = manage_proposal_credentials(
             presentation_id=pres_id,
             rotate_password=True,
+            new_viewer_id="client-acme-vip",
             extend_days=30,
+            tool_context=mock_ctx,
         )
-        assert rotated["password_rotated"] is True
-        assert rotated["new_viewer_password"] != created["viewer_password"]
+        assert cred_res["status"] == "CREDENTIALS_UPDATED"
+        assert cred_res["viewer_id"] == "client-acme-vip"
+        new_pw = cred_res["new_viewer_password"]
+        assert new_pw != old_pw
+        assert verify_password(
+            new_pw,
+            firestore_store[pres_id]["password_hash"],
+            firestore_store[pres_id]["password_salt"],
+        )
 
-        deleted = delete_proposal_website(
+        # 6. Delete / revoke presentation
+        revoked = delete_proposal_website(
             presentation_id=pres_id,
             hard_delete_gcs=True,
+            tool_context=mock_ctx,
         )
-        assert deleted["status"] == "REVOKED"
+        assert revoked["status"] == "REVOKED"
+        assert revoked["is_active"] is False
+        assert revoked["gcs_blob_deleted"] is True
         assert firestore_store[pres_id]["status"] == "revoked"
         assert firestore_store[pres_id]["is_active"] is False
 
@@ -385,64 +418,103 @@ def test_full_lifecycle_create_edit_list_logs_credentials_and_delete() -> None:
 def test_gateway_auth_flows_401_basic_cookie_and_revoked_403() -> None:
     spec = _sample_deck_spec()
     html_bytes = render_deck_html(spec).encode("utf-8")
-    pw = "CorrectHorseBatteryStaple99"
+    pw = "TestPass-123456"
     pw_hash, pw_salt = hash_password(pw)
     pres_id = "prop-20261003-test0001"
-    viewer_id = "client-acme-01"
+    viewer_id = "client-acme-ab12"
 
-    doc_state: dict[str, Any] = {
+    fake_doc: dict[str, Any] = {
         "presentation_id": pres_id,
-        "client_name": spec.client_name,
         "viewer_id": viewer_id,
         "password_hash": pw_hash,
         "password_salt": pw_salt,
-        "is_active": True,
-        "status": "active",
-        "expires_at": (
-            datetime.datetime.now(datetime.timezone.utc)
-            + datetime.timedelta(days=7)
-        ).isoformat(),
         "gcs_bucket": "test-bucket",
         "gcs_blob_path": f"presentations/{pres_id}/index.html",
+        "client_name": spec.client_name,
+        "proposal_title": spec.proposal_title,
+        "expires_at": (
+            datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=7)
+        ).isoformat(),
+        "status": "active",
+        "is_active": True,
     }
+    audit_logs: list[dict[str, Any]] = []
 
     with (
-        patch(
-            "hosting_gateway.main._get_firestore_doc",
-            side_effect=lambda pid: doc_state if pid == pres_id else None,
-        ),
-        patch("hosting_gateway.main._record_access_log"),
-        patch(
-            "hosting_gateway.main._fetch_html_from_gcs",
-            return_value=html_bytes,
+        patch.object(gateway_main, "_get_firestore_doc", side_effect=lambda _: fake_doc),
+        patch.object(gateway_main, "_fetch_html_from_gcs", return_value=html_bytes),
+        patch.object(
+            gateway_main,
+            "_record_access_log",
+            side_effect=lambda pid, vid, method, req: audit_logs.append(
+                {"pid": pid, "vid": vid, "method": method}
+            ),
         ),
     ):
         client = TestClient(gateway_main.app)
 
+        # 0. Health check endpoints (/health and /healthz)
         assert client.get("/health").status_code == 200
         assert client.get("/healthz").status_code == 200
 
+        # 1. Unauthenticated GET -> 401 with WWW-Authenticate & login form
         r_unauth = client.get(f"/p/{pres_id}")
         assert r_unauth.status_code == 401
+        assert "Basic" in r_unauth.headers.get("www-authenticate", "")
+        assert "Secure Proposal Portal" in r_unauth.text
 
-        r_basic = client.get(f"/p/{pres_id}", auth=(viewer_id, pw))
-        assert r_basic.status_code == 200
-        assert 'data-layout="hero-cover"' in r_basic.text
+        # 2. Wrong Basic Auth -> 401
+        bad_b64 = base64.b64encode(f"{viewer_id}:wrong".encode()).decode()
+        r_bad = client.get(
+            f"/p/{pres_id}", headers={"Authorization": f"Basic {bad_b64}"}
+        )
+        assert r_bad.status_code == 401
 
-        doc_state["status"] = "revoked"
-        r_revoked = client.get(f"/p/{pres_id}", auth=(viewer_id, pw))
+        # 3. Valid Basic Auth -> 200 OK + HTML deck + audit log
+        good_b64 = base64.b64encode(f"{viewer_id}:{pw}".encode()).decode()
+        r_good = client.get(
+            f"/p/{pres_id}", headers={"Authorization": f"Basic {good_b64}"}
+        )
+        assert r_good.status_code == 200
+        assert "株式会社アクメリテールホールディングス" in r_good.text
+        assert len(audit_logs) == 1
+        assert audit_logs[0]["method"] == "basic_auth"
+
+        # 4. Form POST Login -> 303 Redirect + Session Cookie -> Subsequent GET 200 OK
+        client.cookies.clear()
+        r_post = client.post(
+            f"/p/{pres_id}/auth",
+            data={"viewer_id": viewer_id, "password": pw},
+            follow_redirects=False,
+        )
+        assert r_post.status_code == 303
+        cookie_key = gateway_main._get_cookie_name(pres_id)
+        assert cookie_key in r_post.cookies
+
+        client.cookies.set(cookie_key, r_post.cookies[cookie_key])
+        r_cookie = client.get(f"/p/{pres_id}")
+        assert r_cookie.status_code == 200
+        assert "AIエージェント×統合CDPによる次世代OMO顧客体験変革" in r_cookie.text
+        assert audit_logs[-1]["method"] == "session_cookie"
+
+        # 5. Revoked status -> 403 Forbidden even with valid credentials
+        fake_doc["status"] = "revoked"
+        r_revoked = client.get(
+            f"/p/{pres_id}", headers={"Authorization": f"Basic {good_b64}"}
+        )
         assert r_revoked.status_code == 403
 
 
 def test_login_html_escapes_xss_payloads() -> None:
-    malicious = '<script>alert("xss")</script>'
     rendered = gateway_main._render_login_html(
-        presentation_id='"><script>alert(1)</script>',
-        client_name=malicious,
-        error_message=malicious,
+        presentation_id='prop-1"><script>alert(1)</script>',
+        client_name='<img src=x onerror=alert(1)>',
+        error_message='<script>evil()</script>',
     )
-    assert '<script>alert("xss")</script>' not in rendered
-    assert "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;" in rendered
+    assert "<script>alert(1)</script>" not in rendered
+    assert "<img src=x onerror=alert(1)>" not in rendered
+    assert "<script>evil()</script>" not in rendered
+    assert "&lt;script&gt;evil()&lt;/script&gt;" in rendered
 
 
 def test_reasoning_engine_adapter_stream_sync_and_async() -> None:
@@ -475,6 +547,7 @@ def test_reasoning_engine_adapter_stream_sync_and_async() -> None:
         attach_reasoning_engine_routes(test_app)
         client = TestClient(test_app)
 
+        # 1. stream_query automatically routes to async_stream_query
         r1 = client.post(
             "/api/stream_reasoning_engine",
             json={"class_method": "stream_query", "input": {"message": "hello"}},
@@ -482,6 +555,7 @@ def test_reasoning_engine_adapter_stream_sync_and_async() -> None:
         assert r1.status_code == 200
         assert '"async_chunk"' in r1.text
 
+        # 2. sync-only generator also streams without TypeError
         r2 = client.post(
             "/api/stream_reasoning_engine",
             json={"class_method": "sync_only_stream", "input": {"message": "sync"}},
@@ -490,56 +564,55 @@ def test_reasoning_engine_adapter_stream_sync_and_async() -> None:
         assert '"sync_chunk"' in r2.text
 
 
-def test_genai_location_routing_and_global_fallback() -> None:
-    import os
+def test_genai_location_routing_and_global_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.agent import _get_genai_location, synthesize_deck_spec_with_skill
 
-    with patch.dict("os.environ", {"GOOGLE_CLOUD_LOCATION": "us-central1"}, clear=False):
-        os.environ.pop("GENAI_LOCATION", None)
-        assert _get_genai_location("gemini-3.8-flash") == "global"
-        assert _get_genai_location("antigravity-preview-05-2026") == "global"
-        assert _get_genai_location("gemini-1.5-pro") == "us-central1"
+    # Default gemini-3.8-flash routes to global even when GOOGLE_CLOUD_LOCATION is regional
+    monkeypatch.delenv("GENAI_LOCATION", raising=False)
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    assert _get_genai_location("gemini-3.8-flash") == "global"
 
-    with patch.dict("os.environ", {"GENAI_LOCATION": "europe-west1"}, clear=False):
-        assert _get_genai_location("gemini-3.8-flash") == "europe-west1"
+    # Explicit GENAI_LOCATION overrides regional default
+    monkeypatch.setenv("GENAI_LOCATION", "europe-west1")
+    assert _get_genai_location("gemini-3.8-flash") == "europe-west1"
 
-    # Verify that if a regional GENAI_LOCATION fails for gemini-3.8-flash, it retries on 'global'
-    spec = _sample_deck_spec()
-    call_locations: list[str] = []
+    # Verify automatic retry on "global" when regional endpoint raises an error
+    attempted_locations: list[str] = []
+    valid_spec_json = _sample_deck_spec().model_dump_json()
 
-    def _fake_client(*args: Any, **kwargs: Any) -> MagicMock:
-        loc = kwargs.get("location", "")
-        call_locations.append(loc)
-        c = MagicMock()
-        if loc != "global":
-            c.models.generate_content.side_effect = RuntimeError("404 Model not found in regional endpoint")
-        else:
-            resp = MagicMock()
-            resp.text = spec.model_dump_json()
-            c.models.generate_content.return_value = resp
-        return c
+    class _FakeModels:
+        def __init__(self, loc: str) -> None:
+            self.loc = loc
 
-    with (
-        patch.dict(
-            "os.environ",
-            {
-                "ENABLE_MANAGED_AGENTS_API": "false",
-                "GENAI_LOCATION": "us-central1",
-                "GEMINI_MODEL": "gemini-3.8-flash",
-            },
-            clear=False,
-        ),
-        patch("app.agent.genai.Client", side_effect=_fake_client),
-    ):
-        deck_out, engine = synthesize_deck_spec_with_skill(
+        def generate_content(self, **kwargs: Any) -> Any:
+            if self.loc != "global":
+                raise RuntimeError(f"Model not found in regional endpoint {self.loc}")
+            m = MagicMock()
+            m.text = valid_spec_json
+            return m
+
+    class _FakeGenAIClient:
+        def __init__(self, *, vertexai: bool, project: str, location: str) -> None:
+            attempted_locations.append(location)
+            self.models = _FakeModels(location)
+
+    with patch("app.agent.genai.Client", _FakeGenAIClient):
+        spec, engine = synthesize_deck_spec_with_skill(
             client_name="株式会社アクメリテールホールディングス",
-            proposal_title="テスト提案",
-            proposal_brief="テスト概要",
+            proposal_title="OMO顧客体験変革",
+            proposal_brief="AIコンシェルジュと統合CDPの構築",
             theme_color="emerald",
         )
-        assert call_locations == ["us-central1", "global"]
-        assert engine == "agent_platform_gemini_with_skill:gemini-3.8-flash"
-        assert deck_out.theme_color == "emerald"
+    assert attempted_locations == ["europe-west1", "global"]
+    assert engine.startswith("agent_platform_gemini_with_skill:")
+    assert spec.theme_color == "emerald"
+
+
+
+
+# ---------------------------------------------------------------------------
+# Asynchronous generation flow (immediate credentials -> 生成中 page -> auto switch)
+# ---------------------------------------------------------------------------
 
 
 def _make_fake_backends() -> dict[str, Any]:
@@ -657,7 +730,6 @@ def test_create_proposal_website_with_free_form_outline_issues_credentials_immed
 
     backends = _make_fake_backends()
     monkeypatch.setenv("GENERATION_TRIGGER_MODE", "none")
-    monkeypatch.setenv("ENABLE_MANAGED_AGENTS_API", "false")
     monkeypatch.delenv("GENERATION_JOB_NAME", raising=False)
     mock_ctx = MagicMock()
     mock_ctx.state = {}
@@ -746,7 +818,7 @@ def test_get_proposal_status_repairs_stale_generation(monkeypatch: pytest.Monkey
         "status": "active",
         "is_active": True,
         "generation_status": "generating",
-        "generation_phase": "managed_agents",
+        "generation_phase": "gemini_fast",
         "generation_requested_at": stale_requested,
         "generation_inputs": {
             "client_name": "株式会社サンプル商事",
@@ -789,7 +861,7 @@ def test_tools_return_error_payloads_instead_of_raising(monkeypatch: pytest.Monk
         backends["firestore"]["prop-gen"] = {
             "presentation_id": "prop-gen",
             "generation_status": "generating",
-            "generation_phase": "managed_agents",
+            "generation_phase": "gemini_fast",
         }
         res = edit_proposal_website("prop-gen", "色を変えて")
         assert res["status"] == "GENERATING"
@@ -827,7 +899,7 @@ def test_gateway_generating_page_status_endpoint_and_auto_switch() -> None:
         "status": "active",
         "is_active": True,
         "generation_status": "generating",
-        "generation_phase": "managed_agents",
+        "generation_phase": "gemini_fast",
         "generation_requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     gcs_calls: list[str] = []
@@ -863,11 +935,11 @@ def test_gateway_generating_page_status_endpoint_and_auto_switch() -> None:
         assert r_status.status_code == 200
         assert r_status.headers["cache-control"] == "no-store, private"
         assert r_status.json()["generation_status"] == "generating"
-        assert r_status.json()["generation_phase"] == "managed_agents"
+        assert r_status.json()["generation_phase"] == "gemini_fast"
 
         # Worker flips Firestore to ready -> status says ready and the same URL now streams the deck
         fake_doc["generation_status"] = "ready"
-        fake_doc["generation_engine"] = "managed_agents_api:antigravity-preview-05-2026"
+        fake_doc["generation_engine"] = "agent_platform_gemini_with_skill:gemini-3.8-flash"
         assert client.get(f"/p/{pres_id}/status").json()["generation_status"] == "ready"
         r_ready = client.get(f"/p/{pres_id}")
         assert r_ready.status_code == 200
@@ -882,87 +954,442 @@ def test_gateway_generating_page_status_endpoint_and_auto_switch() -> None:
         assert "生成に失敗しました" in r_failed.text
 
 
-def test_managed_agents_tier_polls_parses_fenced_json_and_falls_back_on_timeout(
+def test_engine_labels_name_the_adk_designer() -> None:
+    from app.agent import describe_edit_engine, describe_generation_engine
+
+    assert "ADK エージェント（gemini-3.8-flash）" in describe_generation_engine("adk_freeform:gemini-3.8-flash")
+    assert "ADK エージェント（gemini-3.8-flash）" in describe_edit_engine("adk_freeform:gemini-3.8-flash")
+    assert describe_generation_engine("agent_platform_gemini_with_skill:gemini-3.8-flash").startswith("gemini-3.8-flash")
+    assert describe_generation_engine("unknown_engine:x") == "unknown_engine:x"
+
+
+def _create_ready_presentation(backends: dict[str, Any], theme: str = "sky") -> str:
+    spec = _sample_deck_spec(theme)
+    created = create_proposal_website(deck_spec_json=spec.model_dump_json(), theme_color=theme)
+    assert created["status"] == "PUBLISHED", created
+    pres_id = created["presentation_id"]
+    doc = backends["firestore"][pres_id]
+    assert doc["generation_status"] == "ready"
+    assert doc["content_version"] == 1
+    assert doc["design_style"] == "immersive-dark"
+    return pres_id
+
+
+def _index_html(backends: dict[str, Any], pres_id: str) -> str:
+    doc = backends["firestore"][pres_id]
+    return backends["gcs"][f"{doc['gcs_bucket']}/{doc['gcs_blob_path']}"].decode("utf-8")
+
+
+def test_design_styles_render_light_editorial_dark_and_aliases() -> None:
+    from app.agent import normalize_design_style
+
+    spec = _sample_deck_spec("emerald")
+    spec.design_style = "clean-light"
+    light = render_deck_html(spec)
+    assert validate_rendered_html(light) is True
+    assert '<body class="relative" data-theme="emerald" data-style="clean-light">' in light
+    assert "bg-slate-950/80" not in light
+    assert "blur-3xl" not in light
+    assert "Noto+Serif+JP" not in light
+
+    spec.design_style = "editorial-light"
+    editorial = render_deck_html(spec)
+    assert validate_rendered_html(editorial) is True
+    assert 'data-style="editorial-light"' in editorial
+    assert "Noto+Serif+JP" in editorial
+
+    spec.design_style = "immersive-dark"
+    dark = render_deck_html(spec)
+    assert validate_rendered_html(dark) is True
+    assert 'data-style="immersive-dark"' in dark
+    assert "bg-grid-pattern" in dark
+
+    assert normalize_design_style("white") == "clean-light"
+    assert normalize_design_style("Light mode") == "clean-light"
+    assert normalize_design_style("Editorial") == "editorial-light"
+    assert normalize_design_style("unknown-style") == "immersive-dark"
+    spec.design_style = "neon"
+    assert 'data-style="immersive-dark"' in render_deck_html(spec)
+
+
+def test_custom_css_sanitizer_neutralises_hostile_payloads() -> None:
+    from app.agent import sanitize_custom_css
+
+    hostile = (
+        "/* comment */ body { color: #111; } </style><script>alert(1)</script>"
+        '@import url("https://evil.example/x.css"); '
+        ".a { background: url(javascript:alert(1)); } "
+        ".b { background: \\75 rl(https://evil.example/y.png); } "
+        ".c { width: expression(alert(1)); -moz-binding: x; } {{ injected }} "
+        '[data-slide-index="0"] h2 { letter-spacing: .02em; }'
+    )
+    cleaned = sanitize_custom_css(hostile)
+    lowered = cleaned.lower()
+    assert "<" not in cleaned and "\\" not in cleaned
+    assert "@import" not in lowered
+    assert "url(" not in lowered
+    assert "javascript:" not in lowered
+    assert "expression(" not in lowered
+    assert "-moz-binding" not in lowered
+    assert "{{" not in cleaned and "}}" not in cleaned
+    assert "letter-spacing: .02em" in cleaned
+    assert sanitize_custom_css("a{color:red}" * 2000).endswith("}")
+    assert len(sanitize_custom_css("a{color:red}" * 2000)) <= 8000
+
+    spec = _sample_deck_spec()
+    spec.design_style = "clean-light"
+    spec.custom_css = hostile
+    rendered = render_deck_html(spec)
+    # A CSS selector mentioning data-slide-index must not confuse the DOM validator.
+    assert validate_rendered_html(rendered) is True
+    assert "<script>alert(1)" not in rendered
+    assert "evil.example/x.css" not in rendered or "@import" not in rendered.lower()
+
+
+def test_edit_llm_white_redesign_marks_updating_and_reports_verified_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.agent import synthesize_deck_spec_with_skill
+    """Regression: 「背景色が白でぜんぜん違う見た目に」 must visibly change the deck and be reported truthfully."""
+    from app.agent import get_proposal_status
 
-    monkeypatch.setenv("ENABLE_MANAGED_AGENTS_API", "true")
-    monkeypatch.setenv("MANAGED_AGENT_POLL_INTERVAL_SECONDS", "0")
-    monkeypatch.setenv("GENAI_LOCATION", "global")
-    valid_json = _sample_deck_spec(theme_color="amber").model_dump_json()
-    calls: dict[str, Any] = {"create": [], "get": 0, "cancel": 0, "generate": 0}
+    backends = _make_fake_backends()
+    monkeypatch.setenv("GENERATION_TRIGGER_MODE", "none")
+    monkeypatch.setenv("ENABLE_LLM_DECK_EDIT", "true")
+    holder: dict[str, str] = {}
+    observed: list[str] = []
 
-    class _Interaction:
-        def __init__(self, status: str, output_text: str = "") -> None:
-            self.id = "int-123"
-            self.status = status
-            self.output_text = output_text
-            self.errors = None
-
-    class _InteractionsAPI:
-        def __init__(self, mode: str) -> None:
-            self.mode = mode
-            self.polls = 0
-
-        def create(self, **kwargs: Any) -> _Interaction:
-            calls["create"].append(kwargs)
-            return _Interaction("in_progress")
-
-        def get(self, interaction_id: str, **kwargs: Any) -> _Interaction:
-            calls["get"] += 1
-            self.polls += 1
-            if self.mode == "hang":
-                return _Interaction("in_progress")
-            if self.polls < 2:
-                return _Interaction("in_progress")
-            return _Interaction("completed", "設計が完了しました。\n```json\n" + valid_json + "\n```")
-
-        def cancel(self, interaction_id: str) -> None:
-            calls["cancel"] += 1
-
-    class _Models:
-        def generate_content(self, **kwargs: Any) -> Any:
-            calls["generate"] += 1
-            m = MagicMock()
-            m.text = valid_json
-            return m
-
-    mode_holder = {"mode": "ok"}
-
-    class _FakeClient:
+    class _FakeGenAIClient:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
-            self.interactions = _InteractionsAPI(mode_holder["mode"])
-            self.models = _Models()
+            self.models = MagicMock()
+            self.models.generate_content.side_effect = self._generate
 
-    with patch("app.agent.genai.Client", _FakeClient):
-        # (a) Managed Agents completes -> parsed from fenced JSON, correct request shape
-        deck, engine = synthesize_deck_spec_with_skill(
-            client_name="株式会社サンプル商事",
-            proposal_title="提案",
-            proposal_brief="概要",
-            theme_color="amber",
-            outline_hint="スライド2は3つの課題",
-        )
-        assert engine == "managed_agents_api:antigravity-preview-05-2026"
-        assert deck.theme_color == "amber"
-        req = calls["create"][0]
-        assert req["agent"] == "antigravity-preview-05-2026"
-        assert req["background"] is True and req["store"] is True and req["stream"] is False
-        assert req["environment"] == {"type": "remote"}
-        assert "スライド2は3つの課題" in req["input"]
-        assert "config" not in req  # the old (broken) kwarg must never be sent
-        assert calls["generate"] == 0
+        @staticmethod
+        def _generate(*args: Any, **kwargs: Any) -> MagicMock:
+            doc = backends["firestore"][holder["pres_id"]]
+            observed.extend([doc["generation_status"], doc["generation_phase"]])
+            new_deck = PresentationDeckSpec.model_validate(doc["deck_spec"])
+            new_deck.design_style = "clean-light"
+            new_deck.theme_color = "violet"
+            new_deck.custom_css = ".glass-card { border-radius: 2px; }"
+            resp = MagicMock()
+            resp.text = json.dumps(
+                {
+                    "deck_spec": new_deck.model_dump(),
+                    "change_summary": ["白基調のクリーンなデザインに刷新"],
+                    "unsupported_requests": [],
+                },
+                ensure_ascii=False,
+            )
+            return resp
 
-        # (b) Managed Agents exceeds the time budget -> cancelled, fast Gemini tier used
-        mode_holder["mode"] = "hang"
-        deck2, engine2 = synthesize_deck_spec_with_skill(
-            client_name="株式会社サンプル商事",
-            proposal_title="提案",
-            proposal_brief="概要",
-            theme_color="rose",
-            managed_agent_deadline_seconds=1,
+    with (
+        patch("google.cloud.storage.Client", side_effect=backends["storage_factory"]),
+        patch("google.cloud.firestore.Client", side_effect=backends["firestore_factory"]),
+        patch("app.agent.genai.Client", _FakeGenAIClient),
+    ):
+        pres_id = _create_ready_presentation(backends)
+        holder["pres_id"] = pres_id
+        dark_html = _index_html(backends, pres_id)
+        assert 'data-style="immersive-dark"' in dark_html
+
+        res = edit_proposal_website(pres_id, "背景色が白でぜんぜん違う見た目のプレゼンテーションに変えて")
+        assert res["status"] == "UPDATED", res
+        # While the model was working, the deck was marked "updating" (drives the 更新中 banner).
+        assert observed[:2] == ["updating", "edit_designing"]
+        assert res["design_style"] == "clean-light"
+        assert res["theme_color"] == "violet"
+        assert res["content_version"] == 2
+        assert res["edit_engine"].startswith("gemini:")
+        assert any(c.startswith("デザインスタイル") for c in res["verified_changes"])
+        assert any(c.startswith("アクセントカラー") for c in res["verified_changes"])
+        assert any(c.startswith("カスタムCSS") for c in res["verified_changes"])
+        assert res["previous_version_saved"] is True
+
+        doc = backends["firestore"][pres_id]
+        assert doc["generation_status"] == "ready"
+        assert doc["content_version"] == 2
+        assert doc["design_style"] == "clean-light"
+        assert doc["edit_request"] is None
+        assert doc["previous_deck_spec"]["design_style"] == "immersive-dark"
+        assert doc["last_edit_result"]["status"] == "applied"
+
+        new_html = _index_html(backends, pres_id)
+        assert validate_rendered_html(new_html) is True
+        assert 'data-style="clean-light"' in new_html
+        assert 'data-theme="violet"' in new_html
+        assert "border-radius: 2px" in new_html
+        version_keys = [k for k in backends["gcs"] if f"presentations/{pres_id}/versions/" in k]
+        assert len(version_keys) == 1 and version_keys[0].endswith("-v1.html")
+        assert backends["gcs"][version_keys[0]].decode("utf-8") == dark_html
+
+        status = get_proposal_status(pres_id)
+        assert status["generation_status"] == "ready"
+        assert status["content_version"] == 2
+        assert status["design_style"] == "clean-light"
+        assert status["last_edit_result"]["status"] == "applied"
+        assert "反映済み" in status["user_message"]
+
+
+def test_edit_heuristics_without_llm_never_fake_changes_and_support_undo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backends = _make_fake_backends()
+    monkeypatch.setenv("GENERATION_TRIGGER_MODE", "none")
+    monkeypatch.setenv("ENABLE_LLM_DECK_EDIT", "false")
+    with (
+        patch("google.cloud.storage.Client", side_effect=backends["storage_factory"]),
+        patch("google.cloud.firestore.Client", side_effect=backends["firestore_factory"]),
+    ):
+        pres_id = _create_ready_presentation(backends)
+
+        white = edit_proposal_website(pres_id, "背景色を白にして")
+        assert white["status"] == "UPDATED"
+        assert white["design_style"] == "clean-light"
+        assert any(c.startswith("デザインスタイル") for c in white["verified_changes"])
+        assert 'data-style="clean-light"' in _index_html(backends, pres_id)
+
+        before_vague = _index_html(backends, pres_id)
+        callout_before = backends["firestore"][pres_id]["deck_spec"]["custom_callout"]
+        vague = edit_proposal_website(pres_id, "もう少しいい感じにして")
+        assert vague["status"] == "NO_CHANGE"
+        assert vague["verified_changes"] == []
+        assert vague["unsupported_requests"]
+        assert vague["content_version"] == 2
+        assert _index_html(backends, pres_id) == before_vague
+        doc = backends["firestore"][pres_id]
+        assert doc["deck_spec"]["custom_callout"] == callout_before  # no instruction text stuffed into the deck
+        assert doc["generation_status"] == "ready"
+        assert doc["last_edit_result"]["status"] == "no_change"
+
+        dark = edit_proposal_website(pres_id, "やっぱりダークに戻して、アクセントはvioletで")
+        assert dark["status"] == "UPDATED"
+        assert dark["design_style"] == "immersive-dark"
+        assert dark["theme_color"] == "violet"
+        assert dark["content_version"] == 3
+
+        undone = edit_proposal_website(pres_id, undo_last_edit=True)
+        assert undone["status"] == "UPDATED"
+        assert undone["design_style"] == "clean-light"
+        assert undone["theme_color"] == "sky"
+        assert undone["content_version"] == 4
+        assert 'data-style="clean-light"' in _index_html(backends, pres_id)
+
+        explicit = edit_proposal_website(pres_id, new_design_style="editorial", new_theme_color="amber")
+        assert explicit["status"] == "UPDATED"
+        assert explicit["design_style"] == "editorial-light"
+        assert explicit["theme_color"] == "amber"
+
+        bad = edit_proposal_website(pres_id, new_theme_color="gold-ish")
+        assert bad["status"] == "NO_CHANGE"
+        assert bad["unsupported_requests"]
+
+
+def test_edit_busy_lock_stale_repair_and_failure_keeps_previous_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.agent import get_proposal_status
+
+    backends = _make_fake_backends()
+    monkeypatch.setenv("GENERATION_TRIGGER_MODE", "none")
+    monkeypatch.setenv("ENABLE_LLM_DECK_EDIT", "false")
+    with (
+        patch("google.cloud.storage.Client", side_effect=backends["storage_factory"]),
+        patch("google.cloud.firestore.Client", side_effect=backends["firestore_factory"]),
+    ):
+        pres_id = _create_ready_presentation(backends)
+        doc = backends["firestore"][pres_id]
+        html_before = _index_html(backends, pres_id)
+
+        # A fresh "updating" lock -> BUSY, nothing touched.
+        doc.update(
+            {
+                "generation_status": "updating",
+                "generation_phase": "edit_designing",
+                "edit_requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
         )
-    assert engine2.startswith("agent_platform_gemini_with_skill:")
-    assert deck2.theme_color == "rose"
-    assert calls["cancel"] >= 1
+        busy = edit_proposal_website(pres_id, "背景を白に")
+        assert busy["status"] == "BUSY"
+        assert _index_html(backends, pres_id) == html_before
+        live = get_proposal_status(pres_id)
+        assert live["generation_status"] == "updating"
+        assert live["edit_stale_repair_applied"] is False
+        assert "更新中" in live["user_message"]
+
+        # An abandoned lock (crashed edit) is repaired by the status tool ...
+        doc["edit_requested_at"] = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30)
+        ).isoformat()
+        repaired = get_proposal_status(pres_id)
+        assert repaired["edit_stale_repair_applied"] is True
+        assert repaired["generation_status"] == "ready"
+        assert doc["generation_status"] == "ready"
+        assert doc["last_edit_result"]["status"] == "failed"
+
+        # ... and never blocks a new edit either.
+        doc.update({"generation_status": "updating", "edit_requested_at": doc["last_edit_result"]["applied_at"]})
+        doc["edit_requested_at"] = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30)
+        ).isoformat()
+        ok = edit_proposal_website(pres_id, "背景を白に")
+        assert ok["status"] == "UPDATED"
+        assert ok["design_style"] == "clean-light"
+        html_ok = _index_html(backends, pres_id)
+        version_ok = doc["content_version"]
+
+        # Render failure -> EDIT_FAILED, previous HTML/version kept, lock released.
+        with patch("app.agent.render_deck_html", side_effect=RuntimeError("render boom")):
+            failed = edit_proposal_website(pres_id, "アクセントを紫にして")
+        assert failed["status"] == "EDIT_FAILED"
+        assert failed["verified_changes"] == []
+        assert _index_html(backends, pres_id) == html_ok
+        assert doc["generation_status"] == "ready"
+        assert doc["content_version"] == version_ok
+        assert doc["last_edit_result"]["status"] == "failed"
+
+
+def test_worker_keeps_requested_design_style_and_bumps_content_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.generation_worker import generate_presentation
+
+    backends = _make_fake_backends()
+    monkeypatch.setenv("GENERATION_TRIGGER_MODE", "none")
+    monkeypatch.delenv("GENERATION_JOB_NAME", raising=False)
+
+    class _OfflineGenAIClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.models = MagicMock()
+            self.models.generate_content.side_effect = RuntimeError("offline unit test")
+
+    with (
+        patch("google.cloud.storage.Client", side_effect=backends["storage_factory"]),
+        patch("google.cloud.firestore.Client", side_effect=backends["firestore_factory"]),
+        patch("app.agent.genai.Client", _OfflineGenAIClient),
+    ):
+        created = create_proposal_website(
+            client_name="株式会社サンプル商事",
+            proposal_title="統合CDP×AIによる顧客体験変革",
+            proposal_brief="会員・EC・店舗データを統合する",
+            design_style="white",
+        )
+        assert created["status"] == "GENERATING"
+        pres_id = created["presentation_id"]
+        doc = backends["firestore"][pres_id]
+        assert doc["design_style"] == "clean-light"
+        assert doc["content_version"] == 0
+        assert generate_presentation(pres_id)["generation_status"] == "ready"
+        assert doc["design_style"] == "clean-light"
+        assert doc["content_version"] == 1
+        assert doc["deck_spec"]["custom_css"] == ""
+        assert 'data-style="clean-light"' in _index_html(backends, pres_id)
+
+
+def test_gateway_live_update_watcher_updating_banner_and_stale_lock() -> None:
+    spec = _sample_deck_spec()
+    html_bytes = render_deck_html(spec).encode("utf-8")
+    pw = "TestPass-777777"
+    pw_hash, pw_salt = hash_password(pw)
+    pres_id = "prop-20261004-live0001"
+    viewer_id = "client-sample-ef56"
+    fake_doc: dict[str, Any] = {
+        "presentation_id": pres_id,
+        "viewer_id": viewer_id,
+        "password_hash": pw_hash,
+        "password_salt": pw_salt,
+        "gcs_bucket": "test-bucket",
+        "gcs_blob_path": f"presentations/{pres_id}/index.html",
+        "client_name": spec.client_name,
+        "proposal_title": spec.proposal_title,
+        "expires_at": (
+            datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=7)
+        ).isoformat(),
+        "status": "active",
+        "is_active": True,
+        "generation_status": "ready",
+        "content_version": 3,
+        "last_edit_result": {"status": "applied", "verified_changes": ["デザインスタイル: secret detail"]},
+    }
+    gcs_calls: list[str] = []
+
+    def _fake_fetch(bucket: str, path: str) -> bytes:
+        gcs_calls.append(path)
+        return html_bytes
+
+    with (
+        patch.object(gateway_main, "_get_firestore_doc", side_effect=lambda _: fake_doc),
+        patch.object(gateway_main, "_fetch_html_from_gcs", side_effect=_fake_fetch),
+        patch.object(gateway_main, "_record_access_log", side_effect=lambda *a, **k: None),
+    ):
+        client = TestClient(gateway_main.app)
+        good_b64 = base64.b64encode(f"{viewer_id}:{pw}".encode()).decode()
+        auth = {"Authorization": f"Basic {good_b64}"}
+
+        # Ready deck -> streamed with the watcher injected right before </body>
+        r_ready = client.get(f"/p/{pres_id}", headers=auth)
+        assert r_ready.status_code == 200
+        body = r_ready.text
+        assert spec.client_name in body
+        assert 'id="pd-live-update"' in body
+        assert 'data-content-version="3"' in body
+        assert 'data-initial-status="ready"' in body
+        assert "プレゼンテーションを更新中です" in body
+        assert body.rfind('id="pd-live-update"') < body.lower().rfind("</body>")
+        assert "innerHTML" not in body[body.find('id="pd-live-update"') :]
+        assert r_ready.headers["x-content-type-options"] == "nosniff"
+
+        status = client.get(f"/p/{pres_id}/status", headers=auth).json()
+        assert status["generation_status"] == "ready"
+        assert status["content_version"] == 3
+        assert status["last_edit_status"] == "applied"
+        assert "secret detail" not in json.dumps(status, ensure_ascii=False)
+
+        # Edit in progress -> status says updating, the (previous) deck is still served with the banner armed
+        fake_doc.update(
+            {
+                "generation_status": "updating",
+                "generation_phase": "edit_designing",
+                "edit_requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+        )
+        status_upd = client.get(f"/p/{pres_id}/status", headers=auth).json()
+        assert status_upd["generation_status"] == "updating"
+        assert status_upd["generation_phase"] == "edit_designing"
+        r_upd = client.get(f"/p/{pres_id}", headers=auth)
+        assert r_upd.status_code == 200
+        assert 'data-initial-status="updating"' in r_upd.text
+        assert 'data-initial-phase="edit_designing"' in r_upd.text
+
+        # Abandoned lock -> treated as ready by the gateway (viewers are never stuck on 更新中)
+        fake_doc["edit_requested_at"] = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30)
+        ).isoformat()
+        assert client.get(f"/p/{pres_id}/status", headers=auth).json()["generation_status"] == "ready"
+        assert 'data-initial-status="ready"' in client.get(f"/p/{pres_id}", headers=auth).text
+        assert len(gcs_calls) == 3
+
+        # Kill switch
+        with patch.dict("os.environ", {"LIVE_UPDATE_WATCHER": "false"}):
+            assert 'id="pd-live-update"' not in client.get(f"/p/{pres_id}", headers=auth).text
+
+    # Snippet attributes are escaped / allow-listed
+    snippet = gateway_main._render_live_update_snippet(
+        'x"><img src=x onerror=alert(1)>',
+        {"content_version": "7", "generation_phase": '"><script>alert(1)</script>'},
+        "updating",
+    )
+    assert "<img" not in snippet
+    assert "<script>alert(1)" not in snippet
+    assert 'data-content-version="7"' in snippet
+    assert gateway_main._inject_live_update_watcher(b"<p>no body</p>", "<i>w</i>").endswith(b"<i>w</i>")
+
+
+def test_concierge_instruction_requires_truthful_edit_reports() -> None:
+    from app.agent import CONCIERGE_INSTRUCTION
+
+    # ADK treats {name} as state placeholders -> the instruction must not contain braces.
+    assert "{" not in CONCIERGE_INSTRUCTION and "}" not in CONCIERGE_INSTRUCTION
+    assert "verified_changes" in CONCIERGE_INSTRUCTION
+    assert "clean-light" in CONCIERGE_INSTRUCTION
+    assert "更新中" in CONCIERGE_INSTRUCTION
+    assert "（試算）" in CONCIERGE_INSTRUCTION and "search_internal_knowledge` の結果" in CONCIERGE_INSTRUCTION

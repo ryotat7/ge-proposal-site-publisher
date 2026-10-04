@@ -41,6 +41,9 @@ AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Runner for the A2A path, sharing the same session/artifact services as the
+    # adk_api and reasoning_engine paths (see services.py). Imported here so the
+    # agent is built after env/telemetry setup.
     from app.agent import app as adk_app
     from app.agent import root_agent
 
@@ -50,6 +53,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         artifact_service=services.get_artifact_service(),
         auto_create_session=True,
     )
+    # Shared by the A2A path and the reasoning_engine adapter routes.
     app.state.runner = runner
     app.state.agent_app_name = adk_app.name
     await attach_a2a_routes(
@@ -74,8 +78,13 @@ app: FastAPI = get_fast_api_app(
 app.title = "proposal-site-publisher-agent"
 app.description = "API for interacting with the Proposal Site Publisher Agent"
 
+
+# Proxy routes so the Agent Platform Console Playground (reasoning_engine SDK) can
+# talk to this agent alongside the native adk_api routes.
 attach_reasoning_engine_routes(app)
 
+
+# Main execution
 if __name__ == "__main__":
     import uvicorn
 
