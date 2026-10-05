@@ -631,7 +631,7 @@ def test_gateway_serves_freeform_deck_with_canonical_url_csp_assets_and_runtime(
         for name in dc.RUNTIME_FILES:
             runtime = anonymous.get(f"{dc.RUNTIME_BASE}{name}")  # shared runtime, no customer data
             assert runtime.status_code == 200, name
-            assert runtime.headers["cache-control"] == "public, max-age=3600"
+            assert runtime.headers["cache-control"] == "no-cache"
         assert anonymous.get(f"{dc.RUNTIME_BASE}main.py").status_code == 404
         assert anonymous.get(f"{dc.RUNTIME_BASE}evil.js").status_code == 404
 
