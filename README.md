@@ -12,7 +12,10 @@ Unlike static one-shot slide generators, `root_agent` operates as an **Interacti
 
 1. **Consults conversationally first**: greets users naturally (never generating slides prematurely on `"Hello"` or `"こんにちは"`), searches internal knowledge via Agent Search (`search_internal_knowledge`), and agrees on a storyline before publishing.
 2. **Issues the private URL immediately and generates in the background**: `create_proposal_website` returns the share URL, viewer ID and password within ~2 seconds, writes a per-deal Firestore document and starts a **Cloud Run job** (`app/generation_worker.py`). The same URL shows a branded *generating* page that switches to the finished deck automatically (no re-login).
-3. **Designs freely with an ADK designer agent (default)**: inside the job, an ADK `LlmAgent` (`app/adk_designer.py`, `FREEFORM_ADK_MODEL=gemini-3.8-flash`) writes HTML/CSS, SVG diagrams, ECharts chart JSON and optional AI image requests through Cloud Storage-backed file tools. The private **deck renderer** (Cloud Run, headless Chromium) screenshots every slide; the screenshots and layout findings go back to the same ADK session for up to two **review rounds** before publishing. Free design takes 通常 7〜11 分（最長約 20 分）.
+3. **Designs freely with an ADK designer agent (default) in 4-Column Web Proposal Portal (`ui_format="portal"`) or 16:9 Slide Mode (`ui_format="slides"`)**:
+   - **Web Proposal Portal (`ui_format="portal"`, default)**: renders a 4-column structured executive proposal website (`#pd-deck[data-pd-layout="portal"]`) with (1) Left Chapter Rail (`64px`), (2) Context Sidebar (`280px`) with auto-generated Scroll-Spy Table of Contents (`h2`/`h3`), (3) Center Reader (`1fr`) with prev/next chapter pager, and (4) Right Reference Column (`240px`) for source citations, KPIs, and `<aside class="pd-refs">`, plus a built-in **`[▢ スライドで見る]` / `[✕ 記事に戻る]`** header toggle (`ESC` supported) that switches any section into a fullscreen 16:9 slide presentation view on the fly.
+   - **Classic 16:9 Slide Deck (`ui_format="slides"`)**: renders a fullscreen `1600×900` 16:9 slide deck (`#pd-deck[data-pd-layout="slides"]`) when the user requests slide mode (`スライド形式` / `ui_format="slides"`).
+   - Inside the job, an ADK `LlmAgent` (`app/adk_designer.py`, `FREEFORM_ADK_MODEL=gemini-3.8-flash`) writes HTML/CSS, SVG diagrams, ECharts chart JSON and optional AI image requests through Cloud Storage-backed file tools. The private **deck renderer** (Cloud Run, headless Chromium) screenshots every section/slide; the screenshots and layout findings go back to the same ADK session for up to two **review rounds** before publishing. Free design takes 通常 7〜11 分（最長約 20 分）.
 4. **Offers a fast template path**: on request (高速モード) or when no free-form build is publishable, the 6-slide `interactive-slide-designer` template is filled by `gemini-3.8-flash` structured output (deterministic template as the last resort), typically in 1–5 minutes.
 5. **Checks grounding**: percentages that appear in no input (unless labelled as an estimate), unknown e-mail addresses and work-file names are flagged by the `check_deck` tool and in the review turn, so the agent removes them before publishing.
 6. **Edits, versions and undoes in chat**: free-form edits are queued to the same job (`JOB_MODE=freeform_edit`, 通常 5〜7 分（最長約 15 分）); the open deck shows a live **「更新中」** banner and reloads itself when the new version is published. The last 10 versions are kept and **undo only moves the version pointer**. Edit tools report only `verified_changes` (a deterministic diff of the published files), never the model's own claims.
@@ -198,7 +201,9 @@ proposal_agent/.venv/bin/python tests/run_remote_multiturn_e2e.py
    - 過去の RFP や導入事例を `search_internal_knowledge` で検索し、構成案に合意してから Web サイトを発行します。
 2. **URL・ID・パスワードの即時発行とバックグラウンド生成**
    - `create_proposal_website` は約 2 秒で限定公開 URL・閲覧用 ID・パスワードを返し、生成は Cloud Run Job（`app/generation_worker.py`）に任せます。発行直後に URL を開くと「生成中」画面が表示され、完成すると再ログインなしで提案ページに切り替わります。
-3. **ADK のデザイナーエージェントによる自由デザイン（既定）**
+3. **4カラム Web提案ポータル（`ui_format="portal"`、既定）＋ワンクリック16:9スライド切替 ＆ 16:9スライド形式（`ui_format="slides"`）**
+   - **Web提案ポータル形式（`ui_format="portal"`、既定）**: 左端チャプターレール（64px）・左コンテキストサイドバー（280px、`h2`/`h3` 見出しの Scroll-Spy 自動目次付き）・中央メインリーダー（1fr、前後チャプター移動ボタン付き）・右リファレンスカラム（240px、根拠資料・KPI・`<aside class="pd-refs">` 表示）の4カラム構成で表示されます。さらに画面右上の **`[▢ スライドで見る]`** ボタン（または `ESC` キーで **`[✕ 記事に戻る]`**）を押すと、同じページのまま全画面の 16:9 スライドプレゼンモードへ即座に切り替えられます。
+   - **16:9 スライド形式（`ui_format="slides"`）**: 「スライド形式で」と指定した場合は、最初から 16:9 フルスクリーンのスライド形式で生成されます。公開後に `edit_proposal_website(new_ui_format="portal" | "slides")` でいつでも表示フォーマットを切り替え可能です。
    - Job の中で ADK の `LlmAgent`（`app/adk_designer.py`、`FREEFORM_ADK_MODEL=gemini-3.8-flash`）が、Cloud Storage 上の作業領域だけを読み書きする関数ツールを使って、HTML/CSS・SVG の図解・ECharts のグラフ設定・AI 画像の依頼を書きます。JavaScript は書きません。
    - 非公開の Cloud Run サービス **deck renderer**（ヘッドレス Chromium）が全スライドのスクリーンショットを撮り、はみ出しや重なりを検査します。結果は同じ ADK セッションに画像として渡され、エージェントが自分で見直す確認ループを最大 2 回行ってから公開します。
    - 作成にかかる時間は通常 7〜11 分（最長約 20 分）です。
@@ -220,9 +225,9 @@ proposal_agent/.venv/bin/python tests/run_remote_multiturn_e2e.py
 | ツール | 内容 |
 |---|---|
 | `search_internal_knowledge` | 社内ナレッジ・過去提案事例・CRM 商談情報の横断検索（カンマ区切りまたはコロン区切りで複数の Agent Search DataStore を同時検索可能） |
-| `create_proposal_website` | 限定公開 URL・閲覧用 ID・パスワードの即時発行とバックグラウンド生成の開始 |
+| `create_proposal_website` | 限定公開 URL・閲覧用 ID・パスワードの即時発行とバックグラウンド生成の開始（`ui_format="portal"`［既定：4カラム Web提案ポータル＋スライド切替］または `ui_format="slides"`［16:9スライド形式］、`design_mode="freeform"` または `"template"`） |
 | `get_proposal_status` | 生成・修正のフェーズ、使用エンジン、経過時間、完成の目安の確認 |
-| `edit_proposal_website` | 公開済みデッキの修正、デザインの切り替え、取り消し（`undo_last_edit`）、テンプレート版から自由デザイン版への作り直し（`convert_to_freeform`） |
+| `edit_proposal_website` | 公開済みデッキの修正、デザインの切り替え、UIフォーマットの切り替え（`new_ui_format="portal" \| "slides"`）、取り消し（`undo_last_edit`）、テンプレート版から自由デザイン版への作り直し（`convert_to_freeform`） |
 | `list_proposal_websites` | 発行済みサイトの一覧と状態 |
 | `get_proposal_access_logs` | 閲覧日時・認証方式・IP アドレスなどの閲覧ログ |
 | `manage_proposal_credentials` | パスワードの再発行と有効期限の延長 |

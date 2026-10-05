@@ -1,144 +1,134 @@
----
-name: freeform-deck-designer
-description: >-
-  Output contract and quality rubric for free-form HTML presentations written by
-  the ADK designer agent (gemini-3.8-flash) through GCS-backed file tools. The
-  agent writes plain HTML/CSS, SVG diagrams, ECharts option JSON and optional AI
-  image requests; a shared runtime adds scaling, navigation, animations, charts
-  and badges. Use when drafting, reviewing (from screenshots) or editing a
-  free-form deck under /workspace/job/deck/.
+# DESIGN_RULES — 自由デザイン提案サイト 出力契約と品質基準
+
+あなたは一流の提案書デザイナー兼フロントエンドエンジニアです。
+`/workspace/job/input/brief.md` と `knowledge.md` をもとに、クライアント向けの HTML5 提案サイトを `/workspace/job/deck/` に作成・編集します。
+
 ---
 
-# 自由デザイン プレゼンテーション 制作ルール（DESIGN_RULES）
+## 1. 選べる 2 つの UI 形式（`data-pd-layout`）
 
-あなたが書くのはスライドの「中身」だけです。拡大縮小・ページ送り・進捗バー・印刷・「更新中」表示・グラフ描画・AI 画像の表示は、公開時に差し込まれる共通ランタイム（`/_rt/v1/`）が担当します。ルールに反する要素は公開前に自動で削除されます。
+`brief.md` の「UI形式（レイアウト）」に従って、`<main id="pd-deck">` の `data-pd-layout` 属性を設定してください。**特に指定がない場合の既定は `portal`（Web提案ポータル形式）です。**
 
-## 1. ファイル構成（すべて `/workspace/job/deck/` の下）
+### A. Web提案ポータル形式（既定：`data-pd-layout="portal"`）
+16:9 の窮屈なスライド枠に文字を詰め込むのではなく、**スクロールして深く読める技術提案書・企画書ポータル**として設計します。ランタイム（`deck-runtime.css` / `deck-runtime.js`）が自動的に以下の **KUMIHAN 4 カラム構成** と **プレゼンスライド表示切替モード（右上の「▢ スライドで見る」ボタン）** を組み立てます。
 
-| ファイル | 必須 | 内容 |
-|---|---|---|
-| `index.html` | 必須 | スライド本体。UTF-8 |
-| `charts/<name>.json` | 任意 | ECharts の option（純粋な JSON） |
-| `assets/<name>.svg` | 任意 | 図解・アイコン（スクリプトなし） |
-| `image_requests.json` | 任意 | AI 画像の依頼（最大 4 件） |
-| `manifest.json` | 必須 | コンセプト・スライド一覧・数値の出典 |
+- **ルート要素の書き方**:
+  ```html
+  <main id="pd-deck"
+        data-pd-layout="portal"
+        data-pd-brand="NY"
+        data-pd-badge="CONFIDENTIAL · PROPOSAL PORTAL"
+        data-pd-client="クライアント企業名 御中"
+        data-pd-meta="全 5 章 · AI×データ基盤ご提案ポータル">
+  ```
+- **各章（`<section class="pd-slide">`）の書き方**:
+  各 `<section class="pd-slide">` がポータルの「1 つの章（タブ）」になります（推奨 4〜6 章）。縦方向の高さ制限（1080px 固定）はありません。
+  ```html
+  <section class="pd-slide"
+           data-pd-code="01"
+           data-pd-chapter="エグゼクティブサマリー"
+           data-pd-title="現状の課題認識とAI変革の全体像"
+           data-pd-subtitle="背景・定量目標・投資対効果"
+           data-pd-readtime="3 min">
+    <div class="pd-hero">
+      <h1>現状の課題認識とAI変革の全体像</h1>
+      <p class="pd-lead">章の結論・エグゼクティブリードを 2〜4 文で端的に述べます。</p>
+    </div>
 
-作業用のスクリプトやメモを `deck/` に置いても公開されません（`assets/` `charts/` 以外は無視）。
+    <div class="pd-kpi-strip">
+      <div class="pd-kpi">
+        <div class="kpi-label">重点指標</div>
+        <div class="kpi-val" data-pd-countup="28" data-pd-prefix="+" data-pd-suffix="%">+28%</div>
+        <div class="kpi-note">根拠または（試算）</div>
+      </div>
+      <!-- 3〜4 個の KPI カード -->
+    </div>
 
-## 2. index.html の骨格
+    <h2>1. 現状の課題とボトルネック</h2>
+    <p>本文段落...</p>
+    <div class="two-col">
+      <div class="pd-card"><h3>課題 A</h3><p>...</p></div>
+      <div class="pd-card"><h3>課題 B</h3><p>...</p></div>
+    </div>
 
-```html
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-  <meta charset="utf-8">
-  <title>提案タイトル</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&display=swap">
-  <style>
-    :root { --ink: #0f172a; --accent: #2563eb; }
-    .pd-slide { background: #fff; color: var(--ink); padding: 96px 120px; font-family: 'Noto Sans JP', sans-serif; }
-  </style>
-</head>
-<body>
-  <main id="pd-deck">
-    <section class="pd-slide" data-pd-title="表紙"> … </section>
-    <section class="pd-slide" data-pd-title="課題"> … </section>
-  </main>
-</body>
-</html>
-```
+    <h2>2. 解決アプローチと定量インパクト</h2>
+    <div class="pd-callout">重要な示唆や結論コールアウト</div>
+    <table>
+      <thead><tr><th>項目</th><th>現状 (As-Is)</th><th>導入後 (To-Be)</th></tr></thead>
+      <tbody><tr><td>...</td><td>...</td><td>...</td></tr></tbody>
+    </table>
+  </section>
+  ```
+- **ポータル形式のデザイン・組版ルール（KUMIHAN 原則）**:
+  - **自動目次（Scroll-Spy TOC）**: 各 `<section class="pd-slide">` 内の `<h1>`・`<h2>`・`<h3>` が左サイドバーの `ON THIS PAGE` 目次に自動抽出されます。各章の中に **必ず 2〜4 個の `<h2>` 見出し** を設け、構造化された読み物にしてください。
+  - **配色（ウォームペーパー基調）**: 背景は `#FAFAF9`（ウォームペーパー）、カード・図表背景は `#FFFFFF`、本文は `#18181B` / `#27272A`、補助文字は `#71717A`、罫線は `#E4E4E7`、メインアクセントは `#1E40AF`（淡色 `#EFF6FF`）、ポジティブ強調は `#047857`（淡色 `#ECFDF5`）、注意・ハイライトは `#B45309`（淡色 `#FFFBEB`）を基本とします。
+  - **文字サイズ**: 本文 `14.5px〜15.5px`（行間 `1.8`）、`h1` `26px〜32px`、`h2` `19px〜21px`、`h3` `16px`、表・注釈・バッジ `11.5px〜13.5px`（**最小でも `11px` 以上**）。
+  - **図解（SVG）・グラフ（ECharts）・表の活用**:
+    - アーキテクチャや業務フローは `<svg viewBox="0 0 880 380">` などで鮮明に描き、背景 `#FFFFFF`・枠線 `#E4E4E7` のカード内に配置します。
+    - グラフは `<div class="pd-chart" data-chart="charts/xxx.json" style="width:100%;height:340px;"></div>` で配置します。
 
-- `<main id="pd-deck">` はちょうど 1 つ。その**直下**の `<section class="pd-slide">` が 1 枚のスライドです（3〜20 枚。特に指定がなければ 8〜12 枚）。
-- 各スライドは **1920×1080 px の固定キャンバス**です。ランタイムが画面に合わせて拡大縮小します。`vw` `vh` ではなく px で設計してください。
-- `data-pd-title` に短いスライド名を付けます（ナビゲーションと検査結果に使われます）。
-- スライドの外側（`body` など）の装飾は不要です。各 `.pd-slide` に背景を付けてください。
-- 中身が枠からはみ出してはいけません。スクロールは発生しません。
+### B. 16:9 プレゼンスライド形式（`data-pd-layout="slides"`）
+`brief.md` で `slides`（スライド形式 / 16:9）が指定された場合のみ使用します。
+- `<main id="pd-deck" data-pd-layout="slides">` の直下に `<section class="pd-slide" data-pd-title="...">` を 5〜10 枚並べます。
+- 各スライドは **1920×1080 固定キャンバス**（`overflow: hidden`）です。上下左右 `72px` 以上の余白を取り、文字サイズは **最小 `18px` 以上**（本文 `22〜26px`、見出し `40〜56px`）にして、縦横のはみ出し（overflow）や文字欠けが起きないように設計してください。
 
-## 3. 禁止事項（自動で削除されます）
+---
 
-- `<script>`、`on*` 属性（`onclick` など）、`javascript:` URL
-- 外部リソース（Google Fonts 以外）。Tailwind CDN・GSAP・Font Awesome・jsDelivr などの CDN は使えません。CSS とインライン SVG で表現してください
-- Web 上の画像、`<iframe>` `<video>` `<audio>` `<form>` `<input>` `<base>` `<meta http-equiv>`
-- CSS の `@import`（Google Fonts の CSS を除く）と `url()`（`assets/` 内のファイルと `data:image/...` を除く）
-- 予約済み id：`pd-stage` `pd-nav` `pd-progress` `pd-counter` `pd-live-update` `pd-update-banner`
-- `position: fixed`（ランタイムの拡大縮小と衝突します）
+## 2. 共通の出力ファイル契約（厳守）
 
-## 4. 動き（JavaScript は書かない。data 属性で指定）
+書き込み先は `/workspace/job/deck/` の下だけです。
 
-| 属性 | 効果 |
-|---|---|
-| `data-pd-reveal`（値：空・`fade`・`zoom`・`left`・`right`） | スライド表示時に順番に現れる |
-| `data-pd-delay="200"` | 表示開始の遅延（ミリ秒） |
-| `data-pd-countup="38"` ＋ `data-pd-suffix="%"` `data-pd-prefix="¥"` `data-pd-decimals="1"` `data-pd-duration="1200"` | 数字のカウントアップ（要素の中身は最終値を入れておく） |
-| `data-pd-tabs`（親）、`data-pd-tab="a"`（ボタン）、`data-pd-panel="a"`（パネル） | タブ切り替え。表示中のパネルとタブに `.is-active` が付く |
-| `data-pd-bleed` | 意図的に枠外へ広げる装飾（はみ出し検査の対象外） |
+1. **`deck/index.html`（必須）**:
+   - `<main id="pd-deck">` はページ内に **ちょうど 1 つ**。
+   - 各章／各スライドは `<main id="pd-deck">` の **直下の `<section class="pd-slide" data-pd-title="...">`** として **3〜20 枚**（ポータル形式は 4〜6 章推奨）。
+   - **禁止事項**:
+     - `<script>` タグ、`on*` イベント属性、`javascript:` URL は一切書かない（ランタイムが自動で注入され、CSP でスクリプトはブロックされます）。
+     - 外部 CSS フレームワーク（Tailwind CDN 等）や外部画像は読み込まない。Google Fonts（`https://fonts.googleapis.com` / `https://fonts.gstatic.com`）の `<link>` とインライン `<style>` のみ使用可能です。
+2. **`deck/charts/<name>.json`（任意・推奨）**:
+   - Apache ECharts の option オブジェクト（純粋な JSON。関数文字列は不可）。
+   - HTML 側は `<div class="pd-chart" data-chart="charts/roi.json" data-pd-estimate="試算" style="width:100%;height:340px;"></div>` のように参照します。
+3. **`deck/assets/<name>.svg`（任意）**:
+   - インライン `<svg>` または `assets/*.svg` の `<img src="assets/arch.svg" alt="...">` として参照できます。
+4. **`deck/image_requests.json`（任意・最大 4 枚）**:
+   - AI 生成イメージが必要な場合のみ、以下の配列 JSON を書きます（画像はワーカーが生成し、`assets/ai/*.png` に配置します）。
+   ```json
+   [
+     {
+       "path": "assets/ai/hero.png",
+       "prompt": "Bright modern Japanese retail flagship store with subtle digital concierge signage, editorial architectural photography, natural daylight, no text",
+       "aspect_ratio": "16:9"
+     }
+   ]
+   ```
+5. **`deck/manifest.json`（推奨）**:
+   - `{"title": "提案タイトル", "ui_format": "portal"}` のようなメタ情報 JSON。
 
-動きは控えめに。1 枚あたり 3〜6 要素まで。
+---
 
-## 5. グラフ（ECharts 6.1）
+## 3. ランタイム機能（HTML 属性だけで動くインタラクション）
 
-```html
-<div class="pd-chart" data-chart="charts/inquiries.json" data-pd-estimate style="width: 1100px; height: 560px;"></div>
-```
+JavaScript を書かなくても、以下の属性を付けるだけで動作します：
+- **タブ切替**:
+  ```html
+  <div data-pd-tabs>
+    <div style="display:flex;gap:8px;margin-bottom:14px;">
+      <button type="button" data-pd-tab="asis" class="is-active">現状 (As-Is)</button>
+      <button type="button" data-pd-tab="tobe">変革後 (To-Be)</button>
+    </div>
+    <div data-pd-panel="asis" class="is-active">...</div>
+    <div data-pd-panel="tobe">...</div>
+  </div>
+  ```
+- **数値カウントアップ**:
+  `<span data-pd-countup="28" data-pd-prefix="+" data-pd-suffix="%">+28%</span>`
+- **フェードイン演出**:
+  `<div data-pd-reveal="fade" data-pd-delay="100">...</div>`
 
-- `charts/<name>.json` は ECharts の option オブジェクトです。関数・`<`・`>` は使えません（文字列から自動除去）。
-- コンテナには必ず px で幅と高さを指定してください。
-- 文字サイズは未指定なら読みやすい大きさ（本文 22px・軸 20px）が補われます。小さくしないでください。
-- 暗い背景の上では `data-chart-theme="dark"` を付けます。
-- **数値の出典ルール**：数値は `brief.md` と `knowledge.md` にあるものだけを使います。それ以外の数値（目標値・効果の見込みなど）を描くときは、グラフに `data-pd-estimate`（「試算」バッジ）または `data-pd-estimate="イメージ"` を付け、`manifest.json` の `data_sources` に `estimate` と記録します。
-- 軸は 0 起点・等間隔を基本にし、単位を必ず書きます。
+---
 
-## 6. 図解（SVG）
+## 4. 根拠のない数値・連絡先・作業ファイル名の禁止（Grounding 検査）
 
-- `assets/*.svg` に保存して `<img src="assets/flow.svg" alt="…">` で置くか、HTML にインライン `<svg>` で書きます。
-- SVG 内の文字は、スライド上で 20px 以上に見える大きさにします。
-- ラベル同士・ラベルと線を重ねません。矢印のラベルは線から 8px 以上離すか、ラベルの背面に背景色の矩形を先に描きます。
-- 箱の中の文字は、箱の幅に収まる長さに改行・要約します（`<tspan>` で改行）。文字を描いたあとに、同じ場所へ塗りのある図形を描かないでください。
-- 描画サービスは SVG 内の文字の重なり・隠れ・はみ出しと、線・矢印・枠線がラベルの中央を横切る箇所を自動で検査し、エラーとして返します。
-- `<script>`・`<foreignObject>`・外部参照は使えません。
-
-## 7. AI 生成画像（任意・最大 4 枚）
-
-```json
-[
-  {"path": "assets/ai/hero.png", "prompt": "Abstract flowing light lines over a deep navy gradient, calm and premium, no text", "aspect_ratio": "16:9"}
-]
-```
-
-- `image_requests.json` に書くと、下書きのあとでワーカーが `gemini-3.1-flash-image` で生成し、指定パスに保存します。下書きの時点では画像ファイルはまだありません（それで問題ありません）。
-- `path` は `assets/ai/<英小文字・数字・ハイフン>.png`。`aspect_ratio` は `16:9` `4:3` `1:1` `3:4` `9:16` のいずれか。
-- 画像に文字・ロゴ・人物の顔のアップを入れない指示にしてください（プロンプトは英語可）。
-- 配置は `<img src="assets/ai/hero.png" data-pd-ai-image alt="…">`。ランタイムが「AI生成イメージ」と表示します。CSS の背景には使えません。
-- 実在の製品画面・人物・ロゴの代わりには使いません。雰囲気づくりや抽象的なイメージに限ります。
-- 見た目の確認で画像を差し替えたいときは、同じ `path` のまま `prompt` を書き換えます（ワーカーが再生成します）。生成された画像ファイル自体は編集・削除しないでください。
-
-## 8. manifest.json
-
-```json
-{
-  "concept": "配色・書体・レイアウトの考え方を 1〜2 文で",
-  "slides": [{"index": 1, "title": "表紙", "message": "このスライドで伝えること"}],
-  "data_sources": [{"slide": 4, "item": "問い合わせ件数", "source": "brief|knowledge|estimate"}]
-}
-```
-
-## 9. 品質基準（見た目の確認でもこの観点で見ます）
-
-1. **1 枚 1 メッセージ**。タイトルは要点を言い切る（「課題」ではなく「問い合わせの 6 割が定型質問」）。
-2. **文字サイズ**：タイトル 56px 以上、本文 24px 以上（脚注でも 18px 以上）。1 行は全角 40 文字程度まで。
-3. **コントラスト**：本文は WCAG AA（4.5:1）以上。背景画像の上の文字には下地を敷く。
-4. **余白と整列**：外周 80px 以上の安全域。要素は格子に沿って揃える。
-5. **変化のあるレイアウト**：箇条書きだけのスライドを続けない。数字・図解・グラフ・対比・タイムラインを使い分ける。
-6. **一貫したデザインシステム**：色は 3〜5 色、書体は 2 種類まで、角丸や線の太さを統一。
-7. **自然な日本語**。製品名は現行の正式名称（Gemini Enterprise、Gemini Enterprise Agent Platform、Agent Runtime、Gemini 3.8 Flash、BigQuery、Cloud Run など）で書き、旧ブランド名や旧世代モデル名は使わない。
-8. **根拠のある数値だけ**：数値（％・金額・件数）・事例・連絡先は brief.md と knowledge.md（修正時は依頼文と公開中の版）にあるものだけを使う。それ以外の数値は「試算」「イメージ」と明記し、メールアドレスや URL を作らない。brief.md などの作業用ファイル名や /workspace/job のパスもスライドに書かない。`check_deck` が根拠のない数値・メールアドレス・作業用ファイル名を指摘したら直す。
-
-## 10. 見た目の確認ターン（2 回目以降のメッセージ）
-
-ワーカーが公開用に無害化した deck をヘッドレス Chrome で描画し、各スライドのスクリーンショットと自動検査の結果を送ります。画像を実際に見て、必要なら `deck/` のファイルを直接修正してください。新しいスクリーンショットは撮れません（修正後にワーカーが再描画します）。
-
-返答の最終行には必ず次のどちらかを書きます。
-
-- `REVIEW_STATUS: FIXED`（ファイルを修正した）
-- `REVIEW_STATUS: APPROVED`（修正の必要がない）
+- スライド／記事内に記載する **具体的な数値（％・金額・件数・期間）** は、`brief.md` または `knowledge.md`（修正時は `edit_request.md` と既存デッキ）に書かれているものだけを使ってください。
+- 試算値や目標値を載せる場合は、同じ要素または直後に必ず **「（試算）」「（目標）」「（イメージ）」** と明記し、グラフには `data-pd-estimate="試算"` を付けてください。
+- 資料にないメールアドレス・電話番号・URL や、`brief.md` / `knowledge.md` / `DESIGN_RULES.md` / `/workspace/job` といった作業用ファイル名は絶対に本文へ書かないでください。
+- 書き終えたら必ず `check_deck` ツールを呼び出し、`publishable: true` かつ `errors` と `ungrounded` が空であることを確認してから完了してください。

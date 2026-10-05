@@ -273,10 +273,17 @@ def build_brief_md(inputs: dict[str, Any]) -> str:
         value = str(inputs.get(key) or "").strip()
         return f"- **{label}**: {value}\n" if value else ""
 
+    ui_fmt = str(inputs.get("ui_format") or "portal").strip().lower()
+    if ui_fmt == "slides":
+        ui_line = '- **UI形式（レイアウト）**: slides（16:9 固定キャンバス・プレゼンスライド形式 — `<main id="pd-deck" data-pd-layout="slides">`）\n'
+    else:
+        ui_line = '- **UI形式（レイアウト）**: portal（4カラム構成 Web提案ポータル形式【既定】 — `<main id="pd-deck" data-pd-layout="portal">`、左章ナビ＋自動目次＋中央記事リーダー＋右リファレンス＋右上「スライドで見る」切替ボタン付き）\n'
+
     return (
         "# 依頼内容（brief）\n\n"
         + line("クライアント名", "client_name")
         + line("提案タイトル", "proposal_title")
+        + ui_line
         + line("提案の要望・背景", "proposal_brief")
         + line("合意済みの構成メモ", "outline_hint")
         + line("デザインの希望", "design_request")
@@ -304,7 +311,7 @@ DRAFT_PROMPT = f"""あなたは一流のプレゼンテーションデザイナ�
 
 進め方:
 1. DESIGN_RULES.md を最後まで読む。
-2. 構成（スライドごとの主張）とデザインコンセプト（配色・書体・レイアウトの型）を決める。テンプレート的な画一的デザインではなく、内容に合った効果的な表現（数字・図解・グラフ・対比・タイムライン・必要なら AI 画像）を選ぶ。
+2. brief.md の「UI形式（レイアウト）」を確認する。既定の `portal`（Web提案ポータル形式）では `<main id="pd-deck" data-pd-layout="portal">` とし、各 `<section class="pd-slide" data-pd-code="01" data-pd-chapter="..." data-pd-title="...">` を縦スクロールで深く読める章記事（ヒーロー導入・KPIストリップ・複数の h2/h3 見出し・SVG構成図・EChartsグラフ・比較表）として設計する（ランタイムが自動で4カラムポータルと「スライドで見る」切替ボタンを付与する）。`slides` が指定された場合のみ `<main id="pd-deck" data-pd-layout="slides">` の 1920x1080 固定キャンバスで設計する。
 3. index.html、charts/*.json、assets/*.svg、必要なら image_requests.json、manifest.json を書く。
 4. check_deck ツールで自己チェック（スライド数、参照ファイルの存在、JSON の構文、禁止要素、根拠のない数値・メールアドレス・作業用ファイル名）を行い、指摘があれば直す。
 

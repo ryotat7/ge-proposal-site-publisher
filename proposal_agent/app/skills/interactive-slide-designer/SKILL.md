@@ -12,7 +12,7 @@ description: >-
 
 # Interactive Slide Designer Skill
 
-Produces executive-grade, single-file interactive HTML5 slide decks (`index.html`) tailored to each client's industry, visual tone, and strategic narrative.
+Produces executive-grade, single-file interactive HTML5 proposal websites (`index.html`) supporting both **Web Proposal Portal Mode (`ui_format="portal"`, default — 4-column KUMIHAN editorial layout with Chapter Rail, Context Sidebar + Scroll-Spy TOC, Center Reader, Right Reference Rail, and a 1-click `[▢ スライドで見る]` / `[✕ 記事に戻る]` fullscreen 16:9 Slide Presentation Mode toggle)** and **16:9 Slide Mode (`ui_format="slides"`)**.
 
 > **Scope:** This skill covers the template pipeline only (`design_mode=template`: the 高速モード, and the fallback when no free-form build is publishable). Free-form decks (`design_mode=freeform`, the default) follow `app/skills/freeform-deck-designer/SKILL.md` and the output contract in `app/deck_contract.py`.
 

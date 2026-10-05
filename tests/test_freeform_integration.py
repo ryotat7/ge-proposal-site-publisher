@@ -704,3 +704,37 @@ def test_gateway_freeform_generating_and_updating_pages() -> None:
         doc["edit_requested_at"] = (now - datetime.timedelta(minutes=30)).isoformat()
         stale = client.get(f"/p/{pres_id}/status").json()
         assert stale["generation_status"] == "ready" and stale["edit_mode"] == ""
+
+
+def test_ui_format_portal_default_and_slides_override(ff) -> None:
+    backends, pipeline = ff
+    created_default = _create()
+    assert created_default["ui_format"] == "portal"
+    pres_id = created_default["presentation_id"]
+    assert backends["firestore"][pres_id]["ui_format"] == "portal"
+    assert backends["firestore"][pres_id]["generation_inputs"]["ui_format"] == "portal"
+
+    pipeline.script.append(publishes(GOOD))
+    worker.run_job(pres_id, "generate")
+    brief_md = pipeline.calls[-1]["input_files"]["brief.md"]
+    assert "**UI形式（レイアウト）**: portal" in brief_md
+    assert 'data-pd-layout="portal"' in brief_md
+
+    created_slides = _create(ui_format="スライドモード")
+    assert created_slides["ui_format"] == "slides"
+    pres_slides_id = created_slides["presentation_id"]
+    assert backends["firestore"][pres_slides_id]["ui_format"] == "slides"
+    pipeline.script.append(publishes(GOOD))
+    worker.run_job(pres_slides_id, "generate")
+    slides_brief = pipeline.calls[-1]["input_files"]["brief.md"]
+    assert "**UI形式（レイアウト）**: slides" in slides_brief
+
+    # Edit freeform with ui_format switch
+    queued = agent_mod.edit_proposal_website(pres_id, "16:9のスライドモードに切り替えて", ui_format="slides")
+    assert queued["status"] == "EDIT_QUEUED"
+    assert queued["ui_format"] == "slides"
+    pipeline.script.append(publishes(EDITED))
+    worker.run_job(pres_id, "freeform_edit")
+    edit_md = pipeline.calls[-1]["input_files"]["edit_request.md"]
+    assert "UI形式（レイアウト）を次の形式にする" in edit_md and ": slides" in edit_md
+    assert backends["firestore"][pres_id]["ui_format"] == "slides"

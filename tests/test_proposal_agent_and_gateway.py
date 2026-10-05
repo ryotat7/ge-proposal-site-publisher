@@ -1613,3 +1613,20 @@ def test_seed_datastore_preserves_real_connectors_and_binds_engine(
         assert engine_state["dataStoreIds"] == ["legacy-ds", "drive-ds", "salesforce-ds", "extra-bq-ds"]
 
 
+
+
+def test_template_render_portal_and_slides_ui_formats() -> None:
+    spec = _sample_deck_spec()
+    portal_html = render_deck_html(spec, generated_date="2026-10-05 12:00 JST", ui_format="portal")
+    assert validate_rendered_html(portal_html) is True
+    assert 'data-ui-format="portal"' in portal_html
+    assert 'id="tpl-portal-shell"' in portal_html
+    assert 'id="tpl-portal-sidebar"' in portal_html
+    assert 'id="tpl-portal-topbar"' in portal_html
+    assert 'id="tpl-slide-view-btn"' in portal_html
+    assert 'id="tpl-mode-toggle"' in portal_html
+
+    slides_html = render_deck_html(spec, generated_date="2026-10-05 12:00 JST", ui_format="slides")
+    assert validate_rendered_html(slides_html) is True
+    assert 'data-ui-format="slides"' in slides_html
+    assert 'id="tpl-mode-toggle"' in slides_html

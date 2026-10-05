@@ -1,8 +1,10 @@
 /*!
- * NY deck runtime v1 — shared presentation runtime for free-form decks (Apache-2.0).
+ * NY deck runtime v1 — shared presentation & web proposal portal runtime for free-form decks (Apache-2.0).
  *
  * Authoring contract (agents write HTML/CSS/SVG/JSON only, never JavaScript):
- *   <main id="pd-deck"> <section class="pd-slide" data-pd-title="..."> ... </section> ... </main>
+ *   <main id="pd-deck" [data-pd-layout="portal|slides"]>
+ *     <section class="pd-slide" data-pd-title="..." [data-pd-chapter="..."]> ... </section>
+ *   </main>
  *   data-pd-reveal[="fade|zoom|left|right"] [data-pd-delay="ms"]   staged entrance on slide activation
  *   data-pd-countup="1234.5" [data-pd-decimals data-pd-prefix data-pd-suffix data-pd-duration]
  *   data-pd-tabs > [data-pd-tab="k"] + [data-pd-panel="k"]          accessible tabs
@@ -10,7 +12,8 @@
  *   <img src="assets/ai/x.png" data-pd-ai-image>                    adds the 「AI生成イメージ」 caption
  *   data-pd-bleed / aria-hidden="true"                              excluded from layout audits
  * Query flag ?pd_capture=1 disables animation and hides chrome (used by the preview renderer).
- * window.PdDeck exposes ready / go / capture / audit for automated visual review.
+ * Query flag ?view=portal|slides overrides the default layout mode.
+ * window.PdDeck exposes ready / go / capture / audit / setPortalMode / setSlideView.
  */
 (function () {
   "use strict";
@@ -52,18 +55,268 @@
     params = { get: function () { return null; } };
   }
   var captureMode = params.get("pd_capture") === "1";
+  var viewParam = (params.get("view") || "").toLowerCase();
+  var deckLayout = (deck.getAttribute("data-pd-layout") || "").toLowerCase();
+  var hasPortalMarkers = slides.some(function (s) {
+    return s.hasAttribute("data-pd-chapter") || !!s.querySelector(".pd-hero, .hero, .kpi-strip, .pd-kpi-strip");
+  });
+  var initialPortal = viewParam === "portal" || (viewParam !== "slides" && (deckLayout === "portal" || (deckLayout !== "slides" && hasPortalMarkers)));
+
   root.classList.add("pd-runtime");
+  if (initialPortal) {
+    root.classList.add("pd-portal");
+  }
   if (captureMode) {
     root.classList.add("pd-capture", "pd-instant");
   }
 
-  /* ---------- Stage ---------- */
+  /* ---------- Helpers ---------- */
+  function clamp(i) {
+    var n = parseInt(i, 10);
+    if (isNaN(n)) { n = 0; }
+    return Math.max(0, Math.min(slides.length - 1, n));
+  }
+  function raf2() {
+    return new Promise(function (resolve) {
+      window.requestAnimationFrame(function () { window.requestAnimationFrame(resolve); });
+    });
+  }
+  function slideTitle(s, i) {
+    if (!s) { return "スライド " + (i + 1); }
+    var t = s.getAttribute("data-pd-title");
+    if (t) { return t.trim().slice(0, 80); }
+    var h = s.querySelector("h1, h2, h3");
+    return h ? (h.textContent || "").trim().replace(/\s+/g, " ").slice(0, 80) : "スライド " + (i + 1);
+  }
+  function slideChapter(s, i) {
+    if (!s) { return "Chapter " + (i + 1); }
+    var c = s.getAttribute("data-pd-chapter");
+    if (c) { return c.trim().slice(0, 60); }
+    return slideTitle(s, i);
+  }
+  function slideCode(s, i) {
+    if (!s) { return ("0" + (i + 1)).slice(-2); }
+    var code = s.getAttribute("data-pd-code");
+    return code ? code.trim().slice(0, 6) : ("0" + (i + 1)).slice(-2);
+  }
+
+  /* ---------- Stage & 4-Column Portal Shell ---------- */
   var stage = doc.createElement("div");
   stage.id = "pd-stage";
   deck.parentNode.insertBefore(stage, deck);
+
+  var portalShell = doc.createElement("div");
+  portalShell.className = "pd-portal-shell";
+  stage.parentNode.insertBefore(portalShell, stage);
+
+  var rail = doc.createElement("nav");
+  rail.className = "pd-rail pd-portal-only";
+  rail.setAttribute("aria-label", "章ナビゲーション");
+
+  var sidebar = doc.createElement("aside");
+  sidebar.className = "pd-sidebar pd-portal-only";
+  sidebar.setAttribute("aria-label", "目次と構成");
+
+  var reader = doc.createElement("div");
+  reader.className = "pd-reader";
+
+  var slideBar = doc.createElement("div");
+  slideBar.className = "pd-slide-bar pd-portal-only";
+  var slideBarTitle = doc.createElement("div");
+  slideBarTitle.className = "pd-slide-bar-title";
+  var slideExitBtn = doc.createElement("button");
+  slideExitBtn.type = "button";
+  slideExitBtn.id = "pd-portal-article-toggle";
+  slideExitBtn.className = "pd-slide-exit-btn";
+  slideExitBtn.setAttribute("aria-label", "記事に戻る");
+  slideExitBtn.textContent = "✕ 記事に戻る";
+  slideBar.appendChild(slideBarTitle);
+  slideBar.appendChild(slideExitBtn);
+
+  var confBar = doc.createElement("div");
+  confBar.className = "pd-confbar pd-portal-only";
+  var confLeft = doc.createElement("span");
+  confLeft.textContent = deck.getAttribute("data-pd-confidential") || "CONFIDENTIAL — 取扱注意 · ご提案ポータル";
+  var confRight = doc.createElement("span");
+  confRight.id = "pd-readtime";
+  confBar.appendChild(confLeft);
+  confBar.appendChild(confRight);
+
+  var readerBar = doc.createElement("header");
+  readerBar.className = "pd-reader-bar pd-portal-only";
+  var breadcrumb = doc.createElement("div");
+  breadcrumb.id = "pd-breadcrumb";
+  breadcrumb.className = "pd-breadcrumb";
+  var readerActions = doc.createElement("div");
+  readerActions.className = "pd-reader-actions";
+  var slideToggleBtn = doc.createElement("button");
+  slideToggleBtn.type = "button";
+  slideToggleBtn.id = "pd-portal-slide-toggle";
+  slideToggleBtn.className = "pd-slide-toggle-btn";
+  slideToggleBtn.setAttribute("aria-label", "スライドで見る");
+  slideToggleBtn.textContent = "▢ スライドで見る";
+  readerActions.appendChild(slideToggleBtn);
+  readerBar.appendChild(breadcrumb);
+  readerBar.appendChild(readerActions);
+
+  var articleWrap = doc.createElement("div");
+  articleWrap.className = "pd-article-wrap";
+  articleWrap.appendChild(stage);
   stage.appendChild(deck);
+
+  var pager = doc.createElement("nav");
+  pager.className = "pd-pager pd-portal-only";
+  pager.setAttribute("aria-label", "前後の章へ移動");
+  var pagerPrev = doc.createElement("button");
+  pagerPrev.type = "button";
+  pagerPrev.id = "pd-pager-prev";
+  pagerPrev.className = "pd-pager-btn is-prev";
+  var pagerNext = doc.createElement("button");
+  pagerNext.type = "button";
+  pagerNext.id = "pd-pager-next";
+  pagerNext.className = "pd-pager-btn is-next";
+  pager.appendChild(pagerPrev);
+  pager.appendChild(pagerNext);
+  articleWrap.appendChild(pager);
+
+  var footer = doc.createElement("footer");
+  footer.className = "pd-footer pd-portal-only";
+  var footLeft = doc.createElement("span");
+  footLeft.textContent = deck.getAttribute("data-pd-footer") || (doc.title || "Interactive Proposal Portal");
+  var footRight = doc.createElement("span");
+  footRight.textContent = "← / → キーまたは左メニューで章を切り替え";
+  footer.appendChild(footLeft);
+  footer.appendChild(footRight);
+
+  reader.appendChild(slideBar);
+  reader.appendChild(confBar);
+  reader.appendChild(readerBar);
+  reader.appendChild(articleWrap);
+  reader.appendChild(footer);
+
+  var refsCol = doc.createElement("aside");
+  refsCol.className = "pd-refs pd-portal-only";
+  refsCol.setAttribute("aria-label", "根拠・KPIリファレンス");
+
+  portalShell.appendChild(rail);
+  portalShell.appendChild(sidebar);
+  portalShell.appendChild(reader);
+  portalShell.appendChild(refsCol);
+
+  /* Populate Rail & Sidebar */
+  var railBtns = [];
+  var chapterBtns = [];
+  var tocList = doc.createElement("div");
+  tocList.id = "pd-toc-list";
+  tocList.className = "pd-toc-list";
+
+  function buildPortalChrome() {
+    var brand = doc.createElement("div");
+    brand.className = "pd-rail-brand";
+    brand.textContent = (deck.getAttribute("data-pd-brand") || "NY").slice(0, 3);
+    rail.appendChild(brand);
+
+    var sideHead = doc.createElement("div");
+    sideHead.className = "pd-sidebar-head";
+    var badge = doc.createElement("span");
+    badge.className = "pd-doc-badge";
+    badge.textContent = deck.getAttribute("data-pd-badge") || "PROPOSAL PORTAL";
+    var clientEl = doc.createElement("h2");
+    clientEl.className = "pd-client";
+    clientEl.textContent = deck.getAttribute("data-pd-client") || doc.title || "ご提案ポータル";
+    var metaEl = doc.createElement("div");
+    metaEl.className = "pd-doc-meta";
+    metaEl.textContent = deck.getAttribute("data-pd-meta") || ("全 " + slides.length + " 章 · Web提案ポータル");
+    sideHead.appendChild(badge);
+    sideHead.appendChild(clientEl);
+    sideHead.appendChild(metaEl);
+    sidebar.appendChild(sideHead);
+
+    var chapGroup = doc.createElement("div");
+    var chapLabel = doc.createElement("div");
+    chapLabel.className = "pd-sidebar-label";
+    chapLabel.textContent = "CHAPTERS";
+    var chapList = doc.createElement("div");
+    chapList.className = "pd-chapter-list";
+    chapGroup.appendChild(chapLabel);
+    chapGroup.appendChild(chapList);
+    sidebar.appendChild(chapGroup);
+
+    slides.forEach(function (s, idx) {
+      var code = slideCode(s, idx);
+      var chap = slideChapter(s, idx);
+      var title = slideTitle(s, idx);
+      var sub = s.getAttribute("data-pd-subtitle") || (chap !== title ? title : "");
+
+      var rb = doc.createElement("button");
+      rb.type = "button";
+      rb.className = "pd-rail-btn";
+      rb.setAttribute("data-pd-goto", String(idx));
+      rb.setAttribute("title", code + " " + chap);
+      rb.setAttribute("aria-label", code + " " + chap);
+      rb.textContent = code;
+      rb.addEventListener("click", function () { go(idx); });
+      rail.appendChild(rb);
+      railBtns.push(rb);
+
+      var cb = doc.createElement("button");
+      cb.type = "button";
+      cb.className = "pd-chapter-btn";
+      cb.setAttribute("data-pd-goto", String(idx));
+      var codeSpan = doc.createElement("span");
+      codeSpan.className = "pd-chapter-code";
+      codeSpan.textContent = code;
+      var textWrap = doc.createElement("span");
+      var nameSpan = doc.createElement("span");
+      nameSpan.className = "pd-chapter-name";
+      nameSpan.textContent = chap;
+      textWrap.appendChild(nameSpan);
+      if (sub) {
+        var subSpan = doc.createElement("span");
+        subSpan.className = "pd-chapter-sub";
+        subSpan.textContent = sub.slice(0, 48);
+        textWrap.appendChild(subSpan);
+      }
+      cb.appendChild(codeSpan);
+      cb.appendChild(textWrap);
+      cb.addEventListener("click", function () { go(idx); });
+      chapList.appendChild(cb);
+      chapterBtns.push(cb);
+    });
+
+    var spacer = doc.createElement("div");
+    spacer.className = "pd-rail-spacer";
+    rail.appendChild(spacer);
+
+    var railSlideBtn = doc.createElement("button");
+    railSlideBtn.type = "button";
+    railSlideBtn.className = "pd-rail-btn pd-rail-foot";
+    railSlideBtn.setAttribute("title", "スライド表示切替");
+    railSlideBtn.setAttribute("aria-label", "スライド表示切替");
+    railSlideBtn.textContent = "▢";
+    railSlideBtn.addEventListener("click", function () {
+      setSlideView(!root.classList.contains("pd-portal-slides"));
+    });
+    rail.appendChild(railSlideBtn);
+
+    var tocBox = doc.createElement("div");
+    tocBox.className = "pd-toc-box";
+    var tocLabel = doc.createElement("div");
+    tocLabel.className = "pd-sidebar-label";
+    tocLabel.textContent = "ON THIS PAGE";
+    tocBox.appendChild(tocLabel);
+    tocBox.appendChild(tocList);
+    sidebar.appendChild(tocBox);
+  }
+  buildPortalChrome();
+
   var scale = 1;
   function fit() {
+    if (root.classList.contains("pd-portal")) {
+      scale = 1;
+      deck.style.removeProperty("transform");
+      return;
+    }
     var vw = window.innerWidth || W;
     var vh = window.innerHeight || H;
     scale = Math.min(vw / W, vh / H) || 1;
@@ -93,33 +346,181 @@
   }
   var prevBtn = makeButton("前のスライド", "\u2039");
   var nextBtn = makeButton("次のスライド", "\u203A");
+  var modeBtn = makeButton("表示モード切替", "⇄");
+  modeBtn.className = "pd-mode-toggle";
   var counter = doc.createElement("span");
   counter.id = "pd-counter";
   counter.setAttribute("aria-live", "polite");
   nav.appendChild(prevBtn);
   nav.appendChild(counter);
   nav.appendChild(nextBtn);
+  nav.appendChild(modeBtn);
   if (!captureMode) {
     doc.body.appendChild(progress);
     doc.body.appendChild(nav);
   }
 
-  /* ---------- Helpers ---------- */
-  function clamp(i) {
-    var n = parseInt(i, 10);
-    if (isNaN(n)) { n = 0; }
-    return Math.max(0, Math.min(slides.length - 1, n));
+  function setSlideView(on) {
+    if (!root.classList.contains("pd-portal")) {
+      root.classList.toggle("pd-portal", !on);
+    } else {
+      root.classList.toggle("pd-portal-slides", !!on);
+    }
+    fit();
+    try { window.scrollTo(0, 0); } catch (e) { /* ignore */ }
+    window.setTimeout(function () {
+      resizeAllCharts();
+      placeAiBadges();
+    }, 60);
   }
-  function raf2() {
-    return new Promise(function (resolve) {
-      window.requestAnimationFrame(function () { window.requestAnimationFrame(resolve); });
+  function setPortalMode(on) {
+    root.classList.toggle("pd-portal", !!on);
+    if (!on) { root.classList.remove("pd-portal-slides"); }
+    fit();
+    window.setTimeout(function () {
+      resizeAllCharts();
+      placeAiBadges();
+    }, 60);
+  }
+  api.setSlideView = setSlideView;
+  api.setPortalMode = setPortalMode;
+
+  slideToggleBtn.addEventListener("click", function () { setSlideView(true); });
+  slideExitBtn.addEventListener("click", function () { setSlideView(false); });
+  modeBtn.addEventListener("click", function () {
+    if (root.classList.contains("pd-portal-slides")) {
+      setSlideView(false);
+    } else if (root.classList.contains("pd-portal")) {
+      setSlideView(true);
+    } else {
+      setPortalMode(true);
+    }
+  });
+
+  /* ---------- Portal TOC & Right Reference Column ---------- */
+  var currentTocHeadings = [];
+  function updatePortalToc(slide) {
+    while (tocList.firstChild) { tocList.removeChild(tocList.firstChild); }
+    currentTocHeadings = [];
+    if (!slide) { return; }
+    var headings = Array.prototype.slice.call(slide.querySelectorAll("h1, h2, h3"));
+    headings.forEach(function (h, idx) {
+      var text = (h.textContent || "").trim().replace(/\s+/g, " ");
+      if (!text) { return; }
+      var btn = doc.createElement("button");
+      btn.type = "button";
+      btn.className = "pd-toc-link" + (h.tagName === "H3" ? " is-sub" : "") + (idx === 0 ? " is-active" : "");
+      btn.textContent = text.slice(0, 42);
+      btn.addEventListener("click", function () {
+        Array.prototype.forEach.call(tocList.querySelectorAll(".pd-toc-link"), function (el) {
+          el.classList.toggle("is-active", el === btn);
+        });
+        try { h.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) { /* ignore */ }
+      });
+      tocList.appendChild(btn);
+      currentTocHeadings.push({ el: h, btn: btn });
     });
   }
-  function slideTitle(s, i) {
-    var t = s.getAttribute("data-pd-title");
-    if (t) { return t.trim().slice(0, 80); }
-    var h = s.querySelector("h1, h2, h3");
-    return h ? (h.textContent || "").trim().replace(/\s+/g, " ").slice(0, 80) : "スライド " + (i + 1);
+
+  window.addEventListener("scroll", function () {
+    if (!root.classList.contains("pd-portal") || !currentTocHeadings.length) { return; }
+    var activeIdx = 0;
+    for (var i = 0; i < currentTocHeadings.length; i++) {
+      var r = currentTocHeadings[i].el.getBoundingClientRect();
+      if (r.top <= 140) { activeIdx = i; }
+    }
+    currentTocHeadings.forEach(function (item, idx) {
+      item.btn.classList.toggle("is-active", idx === activeIdx);
+    });
+  }, { passive: true });
+
+  function updatePortalRefs(slide, idx) {
+    while (refsCol.firstChild) { refsCol.removeChild(refsCol.firstChild); }
+    if (!slide) { return; }
+
+    var authorRefs = slide.querySelectorAll("aside.pd-refs, [data-pd-ref]");
+    Array.prototype.forEach.call(authorRefs, function (asideEl) {
+      var card = doc.createElement("div");
+      card.className = "pd-ref-card";
+      var hEl = asideEl.querySelector("h3, h4, h5, .pd-ref-title");
+      var titleText = (hEl ? hEl.textContent : (asideEl.getAttribute("data-pd-ref-title") || "REFERENCES & NOTES")) || "REFERENCES & NOTES";
+      var tDiv = doc.createElement("div");
+      tDiv.className = "pd-ref-title";
+      tDiv.textContent = titleText.trim().slice(0, 48);
+      card.appendChild(tDiv);
+      var items = asideEl.querySelectorAll("li, p");
+      if (items.length) {
+        Array.prototype.forEach.call(items, function (it) {
+          var txt = (it.textContent || "").trim().replace(/\s+/g, " ");
+          if (!txt) { return; }
+          var d = doc.createElement("div");
+          d.className = "pd-ref-item";
+          d.textContent = txt.slice(0, 140);
+          card.appendChild(d);
+        });
+      } else {
+        var rawTxt = (asideEl.textContent || "").replace(titleText, "").trim().replace(/\s+/g, " ");
+        if (rawTxt) {
+          var d2 = doc.createElement("div");
+          d2.className = "pd-ref-item";
+          d2.textContent = rawTxt.slice(0, 160);
+          card.appendChild(d2);
+        }
+      }
+      refsCol.appendChild(card);
+    });
+
+    var kpiCard = doc.createElement("div");
+    kpiCard.className = "pd-ref-card";
+    var kpiTitle = doc.createElement("div");
+    kpiTitle.className = "pd-ref-title";
+    kpiTitle.textContent = "KEY HIGHLIGHTS";
+    kpiCard.appendChild(kpiTitle);
+
+    var highlights = [];
+    var kpiNodes = slide.querySelectorAll(".pd-kpi, .kpi, [data-pd-countup], strong");
+    Array.prototype.forEach.call(kpiNodes, function (node) {
+      if (highlights.length >= 4) { return; }
+      var t = (node.textContent || "").trim().replace(/\s+/g, " ").slice(0, 64);
+      if (t && t.length >= 2 && highlights.indexOf(t) === -1) {
+        highlights.push(t);
+      }
+    });
+    if (!highlights.length) {
+      highlights.push(slideTitle(slide, idx));
+    }
+    highlights.forEach(function (text) {
+      var item = doc.createElement("div");
+      item.className = "pd-ref-item";
+      item.textContent = text;
+      kpiCard.appendChild(item);
+    });
+    refsCol.appendChild(kpiCard);
+
+    var navCard = doc.createElement("div");
+    navCard.className = "pd-ref-card";
+    var navTitle = doc.createElement("div");
+    navTitle.className = "pd-ref-title";
+    navTitle.textContent = "DOCUMENT STRUCTURE";
+    navCard.appendChild(navTitle);
+    var chartCount = slide.querySelectorAll(".pd-chart").length;
+    var svgCount = slide.querySelectorAll("svg").length;
+    var tableCount = slide.querySelectorAll("table").length;
+    var statsItem = doc.createElement("div");
+    statsItem.className = "pd-ref-item";
+    statsItem.textContent = "章番号: " + slideCode(slide, idx) + " / " + ("0" + slides.length).slice(-2);
+    navCard.appendChild(statsItem);
+    if (chartCount || svgCount || tableCount) {
+      var figItem = doc.createElement("div");
+      figItem.className = "pd-ref-item";
+      figItem.textContent = "図表・構成図: チャート " + chartCount + " / 図解 " + svgCount + " / 表 " + tableCount;
+      navCard.appendChild(figItem);
+    }
+    var hintItem = doc.createElement("div");
+    hintItem.className = "pd-ref-item";
+    hintItem.textContent = "右上の「スライドで見る」からプレゼン投影モードへ切り替えられます。";
+    navCard.appendChild(hintItem);
+    refsCol.appendChild(navCard);
   }
 
   /* ---------- Reveal ---------- */
@@ -265,8 +666,6 @@
     box.textContent = "グラフを表示できませんでした";
     el.appendChild(box);
   }
-  /* Slides are designed on a 1920x1080 canvas: ECharts' 12px defaults are unreadable there.
-     Fill in larger sizes only where the author did not specify one. */
   function withDefaults(target, defaults) {
     return Object.assign({}, defaults, (target && typeof target === "object") ? target : {});
   }
@@ -276,28 +675,32 @@
     });
   }
   function readableDefaults(opt, el) {
-    opt.textStyle = withDefaults(opt.textStyle, { fontSize: 22, fontFamily: window.getComputedStyle(el).fontFamily });
+    var portal = root.classList.contains("pd-portal");
+    var baseFs = portal ? 13 : 22;
+    var axisFs = portal ? 12 : 20;
+    var titleFs = portal ? 16 : 28;
+    opt.textStyle = withDefaults(opt.textStyle, { fontSize: baseFs, fontFamily: window.getComputedStyle(el).fontFamily });
     ["xAxis", "yAxis", "radiusAxis", "angleAxis", "singleAxis", "parallelAxis"].forEach(function (k) {
       if (!opt[k]) { return; }
       eachObj(opt[k], function (ax) {
-        ax.axisLabel = withDefaults(ax.axisLabel, { fontSize: 20 });
-        ax.nameTextStyle = withDefaults(ax.nameTextStyle, { fontSize: 20 });
+        ax.axisLabel = withDefaults(ax.axisLabel, { fontSize: axisFs });
+        ax.nameTextStyle = withDefaults(ax.nameTextStyle, { fontSize: axisFs });
       });
     });
-    if (opt.legend) { eachObj(opt.legend, function (lg) { lg.textStyle = withDefaults(lg.textStyle, { fontSize: 20 }); }); }
+    if (opt.legend) { eachObj(opt.legend, function (lg) { lg.textStyle = withDefaults(lg.textStyle, { fontSize: axisFs }); }); }
     if (opt.title) {
       eachObj(opt.title, function (t) {
-        t.textStyle = withDefaults(t.textStyle, { fontSize: 28 });
-        t.subtextStyle = withDefaults(t.subtextStyle, { fontSize: 20 });
+        t.textStyle = withDefaults(t.textStyle, { fontSize: titleFs });
+        t.subtextStyle = withDefaults(t.subtextStyle, { fontSize: axisFs });
       });
     }
     if (opt.radar) {
-      eachObj(opt.radar, function (r) { r.axisName = withDefaults(r.axisName, { fontSize: 20 }); });
+      eachObj(opt.radar, function (r) { r.axisName = withDefaults(r.axisName, { fontSize: axisFs }); });
     }
     if (Array.isArray(opt.series)) {
       opt.series.forEach(function (s) {
         if (s && typeof s === "object" && s.label && typeof s.label === "object") {
-          s.label = withDefaults(s.label, { fontSize: 20 });
+          s.label = withDefaults(s.label, { fontSize: axisFs });
         }
       });
     }
@@ -319,7 +722,7 @@
       }
       if (el.clientHeight < 40 || el.clientWidth < 40) {
         api.warnings.push({ type: "chart_unsized", detail: src });
-        if (el.clientHeight < 40) { el.style.height = "480px"; }
+        if (el.clientHeight < 40) { el.style.height = root.classList.contains("pd-portal") ? "320px" : "480px"; }
         if (el.clientWidth < 40) { el.style.width = "100%"; }
       }
       jobs.push(
@@ -401,10 +804,63 @@
     return 0;
   }
   function updateChrome() {
-    counter.textContent = (api.current + 1) + " / " + slides.length;
-    progressBar.style.width = (slides.length ? ((api.current + 1) / slides.length) * 100 : 0) + "%";
-    prevBtn.disabled = api.current <= 0;
-    nextBtn.disabled = api.current >= slides.length - 1;
+    var cur = api.current;
+    var activeSlide = slides[cur];
+    counter.textContent = (cur + 1) + " / " + slides.length;
+    progressBar.style.width = (slides.length ? ((cur + 1) / slides.length) * 100 : 0) + "%";
+    prevBtn.disabled = cur <= 0;
+    nextBtn.disabled = cur >= slides.length - 1;
+
+    railBtns.forEach(function (b, k) {
+      b.classList.toggle("is-active", k === cur);
+      b.setAttribute("aria-current", k === cur ? "page" : "false");
+    });
+    chapterBtns.forEach(function (b, k) {
+      b.classList.toggle("is-active", k === cur);
+      b.setAttribute("aria-current", k === cur ? "page" : "false");
+    });
+
+    if (activeSlide) {
+      var code = slideCode(activeSlide, cur);
+      var chap = slideChapter(activeSlide, cur);
+      var title = slideTitle(activeSlide, cur);
+      breadcrumb.textContent = "";
+      var bcPrefix = doc.createElement("span");
+      bcPrefix.textContent = "Chapter " + code + "  /  ";
+      var bcStrong = doc.createElement("strong");
+      bcStrong.textContent = chap !== title ? (chap + " — " + title) : title;
+      breadcrumb.appendChild(bcPrefix);
+      breadcrumb.appendChild(bcStrong);
+
+      slideBarTitle.textContent = "プレゼン表示モード  ·  " + code + " " + title + " (" + (cur + 1) + " / " + slides.length + ")";
+      var rt = activeSlide.getAttribute("data-pd-readtime") || (Math.max(1, Math.round(((activeSlide.textContent || "").length) / 500)) + " min read");
+      confRight.textContent = "読了目安: " + rt;
+    }
+
+    pagerPrev.disabled = cur <= 0;
+    pagerPrev.textContent = "";
+    var pDir = doc.createElement("span");
+    pDir.className = "pd-pager-dir";
+    pDir.textContent = "← PREVIOUS CHAPTER";
+    var pTitle = doc.createElement("span");
+    pTitle.className = "pd-pager-title";
+    pTitle.textContent = cur > 0 ? (slideCode(slides[cur - 1], cur - 1) + " " + slideChapter(slides[cur - 1], cur - 1)) : "先頭の章です";
+    pagerPrev.appendChild(pDir);
+    pagerPrev.appendChild(pTitle);
+
+    pagerNext.disabled = cur >= slides.length - 1;
+    pagerNext.textContent = "";
+    var nDir = doc.createElement("span");
+    nDir.className = "pd-pager-dir";
+    nDir.textContent = "NEXT CHAPTER →";
+    var nTitle = doc.createElement("span");
+    nTitle.className = "pd-pager-title";
+    nTitle.textContent = cur < slides.length - 1 ? (slideCode(slides[cur + 1], cur + 1) + " " + slideChapter(slides[cur + 1], cur + 1)) : "最後の章です";
+    pagerNext.appendChild(nDir);
+    pagerNext.appendChild(nTitle);
+
+    updatePortalToc(activeSlide);
+    updatePortalRefs(activeSlide, cur);
   }
   function activate(i, opts) {
     if (!slides.length) { return; }
@@ -420,6 +876,11 @@
     if (prev !== next && slides[prev] && !opts.keepPrev) { resetReveal(slides[prev]); }
     api.current = next;
     updateChrome();
+    if (root.classList.contains("pd-portal") && prev !== next && !captureMode) {
+      try { window.scrollTo({ top: 0, behavior: "instant" }); } catch (e) {
+        try { window.scrollTo(0, 0); } catch (e2) { /* ignore */ }
+      }
+    }
     try { window.sessionStorage.setItem(storeKey, String(next)); } catch (e) { /* ignore */ }
     if (!opts.noHash && !captureMode) {
       try { window.history.replaceState(null, "", "#/" + (next + 1)); } catch (e) { /* ignore */ }
@@ -434,6 +895,8 @@
   api.prev = function () { return go(api.current - 1); };
   prevBtn.addEventListener("click", function () { api.prev(); });
   nextBtn.addEventListener("click", function () { api.next(); });
+  pagerPrev.addEventListener("click", function () { api.prev(); });
+  pagerNext.addEventListener("click", function () { api.next(); });
 
   function isInteractive(el) {
     return !!(el && el.closest && el.closest("button, a, input, textarea, select, [data-pd-tab], [contenteditable='true']"));
@@ -441,18 +904,22 @@
   doc.addEventListener("keydown", function (ev) {
     if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) { return; }
     var k = ev.key;
-    if (k === "ArrowRight" || k === "PageDown" || (k === " " && !isInteractive(ev.target))) {
+    var portalReading = root.classList.contains("pd-portal") && !root.classList.contains("pd-portal-slides");
+    if (k === "ArrowRight" || (!portalReading && (k === "PageDown" || (k === " " && !isInteractive(ev.target))))) {
       ev.preventDefault();
       api.next();
-    } else if (k === "ArrowLeft" || k === "PageUp") {
+    } else if (k === "ArrowLeft" || (!portalReading && k === "PageUp")) {
       ev.preventDefault();
       api.prev();
-    } else if (k === "Home") {
+    } else if (!portalReading && k === "Home") {
       ev.preventDefault();
       go(0);
-    } else if (k === "End") {
+    } else if (!portalReading && k === "End") {
       ev.preventDefault();
       go(slides.length - 1);
+    } else if (k === "Escape" && root.classList.contains("pd-portal-slides")) {
+      ev.preventDefault();
+      setSlideView(false);
     }
   });
   window.addEventListener("hashchange", function () {
@@ -515,10 +982,11 @@
       if (cs.backgroundImage && cs.backgroundImage !== "none") { return null; }
       var c = parseColor(cs.backgroundColor);
       if (c && c.a >= 0.85) { return c; }
-      if (cur === deck) { break; }
+      if (cur === doc.body) { break; }
     }
     var bodyBg = parseColor(window.getComputedStyle(doc.body).backgroundColor);
-    return bodyBg && bodyBg.a >= 0.85 ? bodyBg : { r: 255, g: 255, b: 255, a: 1 };
+    if (bodyBg && bodyBg.a >= 0.85) { return bodyBg; }
+    return root.classList.contains("pd-portal") ? { r: 250, g: 250, b: 249, a: 1 } : { r: 255, g: 255, b: 255, a: 1 };
   }
   function excluded(el) {
     return !!el.closest("[data-pd-bleed], [aria-hidden='true'], .pd-chart-badge, .pd-ai-badge");
@@ -528,8 +996,9 @@
     var slide = slides[idx];
     var result = { index: idx, title: slideTitle(slide, idx), issues: [], stats: {} };
     if (!slide) { return result; }
+    var portal = root.classList.contains("pd-portal");
     var sr = slide.getBoundingClientRect();
-    var k = (sr.width / W) || 1;
+    var k = portal ? 1 : ((sr.width / W) || 1);
     var textBoxes = [];
     var smallText = [];
     var textChars = 0;
@@ -555,8 +1024,9 @@
       if (excluded(el)) { continue; }
       if (text || isMedia) {
         var ox = Math.max(0, sr.left - r.left, r.right - sr.right) / k;
-        var oy = Math.max(0, sr.top - r.top, r.bottom - sr.bottom) / k;
-        if (ox > 4 || oy > 4) {
+        var oy = portal ? 0 : (Math.max(0, sr.top - r.top, r.bottom - sr.bottom) / k);
+        var tol = portal ? 12 : 4;
+        if (ox > tol || oy > tol) {
           push("overflow", "error", el, "スライド枠から " + Math.round(Math.max(ox, oy)) + "px はみ出しています");
         }
       }
@@ -570,7 +1040,8 @@
           push("text_clipped", "error", el, "文字が枠内に収まらず切れています");
         }
         var fs = parseFloat(cs.fontSize) || 0;
-        if (fs && fs < 18 && text.length >= 4) { smallText.push(describe(el) + " " + Math.round(fs) + "px"); }
+        var minFs = portal ? 10 : 18;
+        if (fs && fs < minFs && text.length >= 4) { smallText.push(describe(el) + " " + Math.round(fs) + "px"); }
         var fg = parseColor(cs.color);
         var bg = effectiveBackground(el);
         if (fg && bg) {
@@ -603,7 +1074,7 @@
       }
     }
     if (smallText.length) {
-      push("small_text", "warning", null, "18px 未満の文字が " + smallText.length + " 箇所: " + smallText.slice(0, 4).join(" / "));
+      push("small_text", "warning", null, (portal ? "10px" : "18px") + " 未満の文字が " + smallText.length + " 箇所: " + smallText.slice(0, 4).join(" / "));
     }
     if (!textChars && !media) {
       push("empty_slide", "error", slide, "表示される内容がありません");
@@ -613,7 +1084,7 @@
   }
   api.audit = audit;
   api.listSlides = function () {
-    return slides.map(function (s, i) { return { index: i, title: slideTitle(s, i) }; });
+    return slides.map(function (s, i) { return { index: i, title: slideTitle(s, i), chapter: slideChapter(s, i) }; });
   };
   api.capture = function (i) {
     root.classList.add("pd-instant");
