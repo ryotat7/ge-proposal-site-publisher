@@ -2,6 +2,7 @@
     validated in render_deck_html() before rendering, so they are always members of the supported sets. -#}
 {% set theme = deck.theme_color | default('sky') %}
 {% set style = design_style | default(deck.design_style, true) | default('immersive-dark', true) %}
+{% set ui_format = ui_format | default(deck.ui_format, true) | default('portal', true) %}
 {% set is_light = style in ['clean-light', 'editorial-light'] %}
 {% set grad_to_map = {'sky': 'indigo', 'emerald': 'teal', 'violet': 'fuchsia', 'amber': 'orange', 'rose': 'pink'} %}
 {% set grad_hue = grad_to_map.get(theme, 'indigo') %}
@@ -93,7 +94,7 @@
   {% set btn_secondary = 'bg-slate-800 hover:bg-slate-700 text-slate-200' %}
 {% endif %}
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="ja" data-ui-format="{{ ui_format }}">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -181,6 +182,53 @@
       background-image: radial-gradient(rgba(56, 189, 248, 0.12) 1px, transparent 1px);
       background-size: 32px 32px;
     }
+    /* Portal mode layout for template decks */
+    html[data-ui-format="slides"] #tpl-portal-sidebar,
+    html[data-ui-format="slides"] #tpl-portal-topbar {
+      display: none !important;
+    }
+    html[data-ui-format="portal"] body {
+      overflow-x: hidden !important;
+      overflow-y: auto !important;
+      height: auto !important;
+      min-height: 100vh !important;
+      user-select: text !important;
+    }
+    html[data-ui-format="portal"] > body > header {
+      display: none !important;
+    }
+    html[data-ui-format="portal"] #tpl-portal-shell {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      min-height: 100vh;
+      width: 100%;
+    }
+    @media (max-width: 1024px) {
+      html[data-ui-format="portal"] #tpl-portal-shell {
+        grid-template-columns: minmax(0, 1fr);
+      }
+      html[data-ui-format="portal"] #tpl-portal-sidebar {
+        display: none !important;
+      }
+    }
+    html[data-ui-format="portal"] #deck-container {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 1.5rem 2.5rem 6rem 2.5rem;
+      height: auto !important;
+    }
+    html[data-ui-format="portal"] .slide {
+      position: relative !important;
+      inset: auto !important;
+      width: 100% !important;
+      height: auto !important;
+      min-height: 68vh;
+      padding: 2rem 1rem 3rem 1rem !important;
+    }
+    html[data-ui-format="portal"] .tpl-chapter-btn.is-active {
+      border-color: rgba(56, 189, 248, 0.55);
+      background: rgba(56, 189, 248, 0.12);
+    }
   </style>
   {% if custom_css %}
   <!-- Deck-specific overrides (sanitized by sanitize_custom_css before rendering) -->
@@ -211,7 +259,60 @@
     </div>
   </header>
 
-  <main id="deck-container" class="relative w-full h-full">
+  <div id="tpl-portal-shell" class="w-full h-full">
+    <aside id="tpl-portal-sidebar" class="sticky top-0 h-screen overflow-y-auto border-r {{ rule }} p-5 flex flex-col justify-between z-20">
+      <div>
+        <div class="flex items-center gap-2.5 mb-4 pb-3 border-b {{ rule }}">
+          <span class="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-gradient-to-br {{ grad_from }} {{ grad_to }} text-white font-bold text-xs shadow">{{ brand_badge | default('SP') }}</span>
+          <div class="min-w-0">
+            <div class="font-mono-code text-[10px] uppercase tracking-wider {{ accent_text }}">PROPOSAL PORTAL</div>
+            <div class="text-xs font-bold truncate {{ t_heading }}">{{ deck.client_name }} 御中</div>
+          </div>
+        </div>
+        <div class="font-mono-code text-[10px] uppercase tracking-widest {{ t_muted }} mb-2">CHAPTERS (06)</div>
+        <nav class="space-y-1.5" aria-label="章ナビゲーション">
+          <button type="button" data-target-slide="0" class="tpl-chapter-btn is-active w-full text-left px-3 py-2 rounded-lg border border-transparent transition flex items-baseline gap-2.5">
+            <span class="font-mono-code text-xs font-bold {{ accent_text }}">01</span>
+            <span class="text-xs font-semibold {{ t_body_strong }}">表紙・ご提案概要</span>
+          </button>
+          <button type="button" data-target-slide="1" class="tpl-chapter-btn w-full text-left px-3 py-2 rounded-lg border border-transparent transition flex items-baseline gap-2.5">
+            <span class="font-mono-code text-xs font-bold {{ accent_text }}">02</span>
+            <span class="text-xs font-semibold {{ t_body_strong }}">現状課題とエグゼクティブ結論</span>
+          </button>
+          <button type="button" data-target-slide="2" class="tpl-chapter-btn w-full text-left px-3 py-2 rounded-lg border border-transparent transition flex items-baseline gap-2.5">
+            <span class="font-mono-code text-xs font-bold {{ accent_text }}">03</span>
+            <span class="text-xs font-semibold {{ t_body_strong }}">As-Is / To-Be と顧客体験変革</span>
+          </button>
+          <button type="button" data-target-slide="3" class="tpl-chapter-btn w-full text-left px-3 py-2 rounded-lg border border-transparent transition flex items-baseline gap-2.5">
+            <span class="font-mono-code text-xs font-bold {{ accent_text }}">04</span>
+            <span class="text-xs font-semibold {{ t_body_strong }}">4層システム・データ連携構成</span>
+          </button>
+          <button type="button" data-target-slide="4" class="tpl-chapter-btn w-full text-left px-3 py-2 rounded-lg border border-transparent transition flex items-baseline gap-2.5">
+            <span class="font-mono-code text-xs font-bold {{ accent_text }}">05</span>
+            <span class="text-xs font-semibold {{ t_body_strong }}">導入ロードマップ（3フェーズ）</span>
+          </button>
+          <button type="button" data-target-slide="5" class="tpl-chapter-btn w-full text-left px-3 py-2 rounded-lg border border-transparent transition flex items-baseline gap-2.5">
+            <span class="font-mono-code text-xs font-bold {{ accent_text }}">06</span>
+            <span class="text-xs font-semibold {{ t_body_strong }}">期待ROIとネクストステップ</span>
+          </button>
+        </nav>
+      </div>
+      <div class="pt-4 border-t {{ rule }} text-[11px] {{ t_muted }}">
+        <div>GENERATED: {{ generated_date }}</div>
+      </div>
+    </aside>
+    <div class="min-w-0 flex-1 flex flex-col">
+      <div id="tpl-portal-topbar" class="sticky top-0 z-20 px-8 py-3 border-b {{ rule }} flex items-center justify-between gap-4">
+        <div class="text-xs {{ t_muted }} truncate">
+          <span class="font-mono-code uppercase {{ accent_text }}">CONFIDENTIAL</span>
+          <span class="mx-2">/</span>
+          <strong class="{{ t_heading }}">{{ deck.proposal_title }}</strong>
+        </div>
+        <button id="tpl-slide-view-btn" type="button" class="px-3 py-1.5 rounded-lg {{ btn_secondary }} text-xs font-mono-code transition flex items-center gap-1.5 shrink-0">
+          <i class="fa-solid fa-display"></i> スライドで見る
+        </button>
+      </div>
+      <main id="deck-container" class="relative w-full h-full" data-ui-format="{{ ui_format }}">
     <!-- Slide 01: Hero Cover -->
     <section class="slide active" data-slide-index="0" data-layout="hero-cover">
       <div class="my-auto max-w-5xl">
@@ -476,7 +577,9 @@
         THANK YOU FOR YOUR TIME // {{ (brand_name | default('STRATEGIC AI PARTNERS')) | upper }}
       </div>
     </section>
-  </main>
+      </main>
+    </div>
+  </div>
 
   <!-- Bottom Navigation Bar & Progress -->
   <footer class="fixed bottom-0 left-0 right-0 z-30 px-20 py-4 {{ footer_bar }} flex items-center justify-between">
@@ -487,6 +590,9 @@
       </div>
     </div>
     <div class="flex items-center gap-2">
+      <button id="tpl-mode-toggle" type="button" class="px-3 py-1.5 rounded-lg {{ btn_secondary }} text-xs font-mono-code transition flex items-center gap-1.5">
+        <i class="fa-solid fa-table-columns"></i> <span id="tpl-mode-label">表示切替</span>
+      </button>
       <button id="prev-btn" type="button" class="px-3.5 py-1.5 rounded-lg {{ btn_secondary }} text-xs font-mono-code transition flex items-center gap-1.5">
         <i class="fa-solid fa-chevron-left"></i> PREV
       </button>
@@ -521,6 +627,47 @@
         }
       }
 
+      const chapterBtns = Array.from(document.querySelectorAll('.tpl-chapter-btn'));
+      const modeToggleBtn = document.getElementById('tpl-mode-toggle');
+      const modeLabelEl = document.getElementById('tpl-mode-label');
+      const slideViewBtn = document.getElementById('tpl-slide-view-btn');
+
+      function syncModeLabel() {
+        const curFmt = document.documentElement.getAttribute('data-ui-format') || 'portal';
+        if (modeLabelEl) {
+          modeLabelEl.textContent = curFmt === 'portal' ? 'スライドで見る' : '記事に戻る';
+        }
+      }
+      function setUiFormat(fmt) {
+        const nextFmt = fmt === 'slides' ? 'slides' : 'portal';
+        document.documentElement.setAttribute('data-ui-format', nextFmt);
+        const mainEl = document.getElementById('deck-container');
+        if (mainEl) mainEl.setAttribute('data-ui-format', nextFmt);
+        syncModeLabel();
+      }
+      try {
+        const q = new URLSearchParams(window.location.search).get('view');
+        if (q === 'portal' || q === 'slides') setUiFormat(q);
+      } catch (e) {}
+      syncModeLabel();
+      if (modeToggleBtn) {
+        modeToggleBtn.addEventListener('click', function() {
+          const curFmt = document.documentElement.getAttribute('data-ui-format') || 'portal';
+          setUiFormat(curFmt === 'portal' ? 'slides' : 'portal');
+        });
+      }
+      if (slideViewBtn) {
+        slideViewBtn.addEventListener('click', function() {
+          setUiFormat('slides');
+        });
+      }
+      chapterBtns.forEach((btn) => {
+        btn.addEventListener('click', function() {
+          const idx = parseInt(btn.getAttribute('data-target-slide') || '0', 10);
+          showSlide(idx);
+        });
+      });
+
       function showSlide(index) {
         if (index < 0 || index >= totalSlides) return;
         slides.forEach((s, idx) => {
@@ -529,6 +676,9 @@
           } else {
             s.classList.remove('active');
           }
+        });
+        chapterBtns.forEach((b, idx) => {
+          b.classList.toggle('is-active', idx === index);
         });
         currentIndex = index;
         counterEl.textContent = pad2(currentIndex + 1) + ' / ' + pad2(totalSlides);
@@ -558,7 +708,7 @@
       // Restore the slide the viewer was on before an automatic "updated version" reload.
       let startIndex = 0;
       try {
-        const restoreKey = 'pd-deck-slide:' + window.location.pathname;
+        const restoreKey = 'ny-deck-slide:' + window.location.pathname;
         const saved = window.sessionStorage ? window.sessionStorage.getItem(restoreKey) : null;
         if (saved !== null) {
           window.sessionStorage.removeItem(restoreKey);

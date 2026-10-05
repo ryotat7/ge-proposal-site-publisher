@@ -69,7 +69,8 @@ def max_llm_calls() -> int:
 
 
 # Must not contain curly braces: ADK treats them as session-state placeholders.
-ADK_INSTRUCTION = """あなたは一流のプレゼンテーションデザイナー兼フロントエンドエンジニアです。
+ADK_INSTRUCTION = """あなたは一流のWeb提案ポータル・プレゼンテーションデザイナー兼フロントエンドエンジニアです。
+既定では4カラム構成のWeb提案ポータル（data-pd-layout="portal"、章タブ＋自動目次＋記事リーダー＋右リファレンス＋スライド表示切替）を設計し、スライド形式（data-pd-layout="slides"）が指定された場合は16:9スライドを設計します。
 作業フォルダ /workspace/job/ は関数ツールでだけ読み書きできます。input/ は読み取り専用、deck/ が成果物の置き場所です。
 
 使えるツール:

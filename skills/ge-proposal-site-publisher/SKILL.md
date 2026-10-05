@@ -8,8 +8,10 @@ description: >-
   authentication gateway + private Cloud Storage + Firestore + Agent Search).
   Use when building an enterprise conversational agent that consults with
   business users, issues client-scoped ID/password URLs immediately, designs
-  HTML proposal decks in the background (free-form design reviewed from
-  rendered screenshots, or a fast 6-slide template), and manages the
+  HTML proposal websites in the background in either a 4-column Web Proposal
+  Portal (`ui_format="portal"`, default, with built-in `[▢ スライドで見る]` 16:9
+  slide presentation mode toggle) or classic 16:9 Slide mode (`ui_format="slides"`),
+  and manages the
   post-publication lifecycle (status, edit, versions/undo with a live
   updating banner, list, audit logs, credential rotation, and revocation).
 ---
@@ -56,7 +58,7 @@ End-to-end engineering blueprint and automation skill for deploying an interacti
 
 ## 2. Critical Implementation Guardrails (Gotchas)
 
-1. **Conversational first — never generate slides on greetings**: use an interactive `LlmAgent` concierge as `root_agent`; greet, explain capabilities, ask clarifying questions (client, challenge, free design vs fast mode), and only call `create_proposal_website` when the user gives concrete parameters or approves an outline.
+1. **Conversational first — never generate slides on greetings**: use an interactive `LlmAgent` concierge as `root_agent`; greet, explain capabilities, ask clarifying questions (client, challenge, free design vs fast mode, and UI format: default 4-column Web Proposal Portal `ui_format="portal"` with `[▢ スライドで見る]` 16:9 slide toggle vs classic 16:9 slide deck `ui_format="slides"`), and only call `create_proposal_website` when the user gives concrete parameters or approves an outline.
 2. **No curly braces `{var}` in ADK instructions**: ADK interpolates `{variable}` against `session.state` and raises `KeyError` if unset. This applies to `CONCIERGE_INSTRUCTION` and to the designer's `ADK_INSTRUCTION`.
 3. **Cloud Run health check path is `/health`, not `/healthz`**: the Google Frontend on `*.run.app` reserves paths ending in `z`.
 4. **Agent Search quota project**: pass `ClientOptions(quota_project_id=project_id)` to `discoveryengine.SearchServiceClient` to avoid `403 PERMISSION_DENIED` under ADC.
