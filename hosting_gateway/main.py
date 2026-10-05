@@ -1000,6 +1000,7 @@ def _serve_presentation(presentation_id: str, request: Request, trailing_slash: 
             # Agent-written markup: only our same-origin runtime and this response's nonce may execute.
             nonce = secrets.token_urlsafe(18)
             headers["Content-Security-Policy"] = dc.freeform_csp(nonce)
+            html_bytes = _inject_runtime_version(html_bytes)
         if _live_update_enabled():
             # Open tabs show a "更新中" banner while the deck is being edited and switch to the new version.
             html_bytes = _inject_live_update_watcher(
@@ -1089,6 +1090,25 @@ def _runtime_file(name: str) -> bytes | None:
         return None
 
 
+@functools.lru_cache(maxsize=1)
+def _runtime_version_tag() -> str:
+    h = hashlib.sha256()
+    for name in ("deck-runtime.css", "deck-runtime.js"):
+        data = _runtime_file(name)
+        if data:
+            h.update(data)
+    return h.hexdigest()[:8]
+
+
+def _inject_runtime_version(html_bytes: bytes) -> bytes:
+    ver = _runtime_version_tag().encode("ascii")
+    for name in (b"deck-runtime.css", b"deck-runtime.js"):
+        target = dc.RUNTIME_BASE.encode("ascii") + name + b'"'
+        replacement = dc.RUNTIME_BASE.encode("ascii") + name + b"?v=" + ver + b'"'
+        html_bytes = html_bytes.replace(target, replacement)
+    return html_bytes
+
+
 @app.get(dc.RUNTIME_BASE + "{name}")
 def deck_runtime_file(name: str) -> Response:
     """Shared, versioned deck runtime (no customer data): the only scripts a free-form deck may load."""
@@ -1101,7 +1121,7 @@ def deck_runtime_file(name: str) -> Response:
     return Response(
         content=data,
         media_type=media_type,
-        headers={"Cache-Control": "public, max-age=3600", "X-Content-Type-Options": "nosniff"},
+        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
     )
 
 

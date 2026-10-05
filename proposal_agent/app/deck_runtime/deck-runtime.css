@@ -108,8 +108,8 @@ html.pd-runtime.pd-portal {
   color: var(--pd-ink);
   height: auto !important;
   min-height: 100%;
-  overflow-x: hidden !important;
-  overflow-y: auto !important;
+  overflow-x: clip !important;
+  overflow-y: visible !important;
 }
 
 html.pd-runtime.pd-portal body {
@@ -118,7 +118,7 @@ html.pd-runtime.pd-portal body {
   width: 100% !important;
   min-height: 100vh !important;
   height: auto !important;
-  overflow-x: hidden !important;
+  overflow-x: clip !important;
   overflow-y: visible !important;
   background: var(--pd-paper) !important;
   color: var(--pd-ink) !important;
@@ -129,36 +129,21 @@ html.pd-runtime.pd-portal body {
 }
 
 html.pd-runtime.pd-portal .pd-portal-shell {
-  display: grid;
-  grid-template-columns: 64px 272px minmax(0, 1fr) 268px;
+  display: block;
   min-height: 100vh;
   width: 100%;
-  align-items: start;
+  padding-left: 336px;
+  padding-right: 268px;
+  box-sizing: border-box;
 }
 
-@media (max-width: 1440px) {
-  html.pd-runtime.pd-portal .pd-portal-shell {
-    grid-template-columns: 60px 248px minmax(0, 1fr);
-  }
-  html.pd-runtime.pd-portal .pd-refs {
-    display: none !important;
-  }
-}
-
-@media (max-width: 1024px) {
-  html.pd-runtime.pd-portal .pd-portal-shell {
-    grid-template-columns: 56px minmax(0, 1fr);
-  }
-  html.pd-runtime.pd-portal .pd-sidebar,
-  html.pd-runtime.pd-portal .pd-refs {
-    display: none !important;
-  }
-}
-
-/* Column 1: Left Chapter Rail */
+/* Column 1: Left Chapter Rail (Fixed to viewport so vertical scroll never leaves blank sidebars) */
 html.pd-runtime.pd-portal .pd-rail {
-  position: sticky;
+  position: fixed;
   top: 0;
+  left: 0;
+  bottom: 0;
+  width: 64px;
   height: 100vh;
   background: var(--pd-rail-bg);
   color: #a1a1aa;
@@ -216,10 +201,13 @@ html.pd-runtime.pd-portal .pd-rail-foot {
   font-size: 14px;
 }
 
-/* Column 2: Context Sidebar + Scroll-Spy TOC */
+/* Column 2: Context Sidebar + Scroll-Spy TOC (Fixed to viewport) */
 html.pd-runtime.pd-portal .pd-sidebar {
-  position: sticky;
+  position: fixed;
   top: 0;
+  left: 64px;
+  bottom: 0;
+  width: 272px;
   height: 100vh;
   overflow-y: auto;
   background: var(--pd-subtle);
@@ -228,6 +216,7 @@ html.pd-runtime.pd-portal .pd-sidebar {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  z-index: 25;
   box-sizing: border-box;
 }
 html.pd-runtime.pd-portal .pd-sidebar-head {
@@ -650,10 +639,13 @@ html.pd-runtime.pd-portal .pd-footer {
   display: none !important;
 }
 
-/* Column 4: Right Reference Column */
+/* Column 4: Right Reference Column (Fixed to viewport) */
 html.pd-runtime.pd-portal .pd-portal-shell > .pd-refs {
-  position: sticky;
+  position: fixed;
   top: 0;
+  right: 0;
+  bottom: 0;
+  width: 268px;
   height: 100vh;
   overflow-y: auto;
   background: var(--pd-paper);
@@ -662,7 +654,39 @@ html.pd-runtime.pd-portal .pd-portal-shell > .pd-refs {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  z-index: 25;
   box-sizing: border-box;
+}
+
+@media (max-width: 1440px) {
+  html.pd-runtime.pd-portal .pd-portal-shell {
+    padding-left: 308px;
+    padding-right: 0;
+  }
+  html.pd-runtime.pd-portal .pd-rail {
+    width: 60px;
+  }
+  html.pd-runtime.pd-portal .pd-sidebar {
+    left: 60px;
+    width: 248px;
+  }
+  html.pd-runtime.pd-portal .pd-portal-shell > .pd-refs {
+    display: none !important;
+  }
+}
+
+@media (max-width: 1024px) {
+  html.pd-runtime.pd-portal .pd-portal-shell {
+    padding-left: 56px;
+    padding-right: 0;
+  }
+  html.pd-runtime.pd-portal .pd-rail {
+    width: 56px;
+  }
+  html.pd-runtime.pd-portal .pd-sidebar,
+  html.pd-runtime.pd-portal .pd-portal-shell > .pd-refs {
+    display: none !important;
+  }
 }
 html.pd-runtime.pd-portal .pd-ref-card {
   background: var(--pd-surface);
@@ -707,6 +731,8 @@ html.pd-runtime.pd-portal.pd-portal-slides .pd-portal-shell {
   display: flex !important;
   flex-direction: column;
   min-height: 100vh;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
 }
 html.pd-runtime.pd-portal.pd-portal-slides .pd-rail,
 html.pd-runtime.pd-portal.pd-portal-slides .pd-sidebar,
