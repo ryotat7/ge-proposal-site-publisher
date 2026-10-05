@@ -56,6 +56,31 @@ DESIGN_STYLE_LABELS = {
     "clean-light": "白基調クリーン（clean-light）",
     "editorial-light": "生成り色エディトリアル（editorial-light）",
 }
+SUPPORTED_UI_FORMATS = ("portal", "slides")
+DEFAULT_UI_FORMAT = "portal"
+UI_FORMAT_LABELS = {
+    "portal": "4カラムWeb提案ポータル形式（portal）",
+    "slides": "16:9 プレゼンスライド形式（slides）",
+}
+_UI_FORMAT_ALIASES = {
+    "portal": "portal",
+    "web": "portal",
+    "article": "portal",
+    "doc": "portal",
+    "document": "portal",
+    "kumihan": "portal",
+    "ポータル": "portal",
+    "記事": "portal",
+    "ドキュメント": "portal",
+    "4カラム": "portal",
+    "slides": "slides",
+    "slide": "slides",
+    "deck": "slides",
+    "16:9": "slides",
+    "presentation": "slides",
+    "スライド": "slides",
+    "プレゼン": "slides",
+}
 _DESIGN_STYLE_ALIASES = {
     "editorial": "editorial-light",
     "magazine": "editorial-light",
@@ -106,6 +131,21 @@ def normalize_design_style(value: Any, default: str = DEFAULT_DESIGN_STYLE) -> s
     return default
 
 
+def normalize_ui_format(value: Any, default: str = DEFAULT_UI_FORMAT) -> str:
+    """Maps UI format names onto 'portal' (default 4-column web proposal portal) or 'slides' (16:9 slide deck)."""
+    raw = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+    if not raw:
+        return default
+    if raw in SUPPORTED_UI_FORMATS:
+        return raw
+    if raw in _UI_FORMAT_ALIASES:
+        return _UI_FORMAT_ALIASES[raw]
+    for key, mapped in _UI_FORMAT_ALIASES.items():
+        if key in raw:
+            return mapped
+    return default
+
+
 def sanitize_custom_css(css: Any, max_chars: int = CUSTOM_CSS_MAX_CHARS) -> str:
     """Neutralises LLM-authored CSS before it is embedded verbatim inside a <style> element.
 
@@ -131,10 +171,11 @@ def sanitize_custom_css(css: Any, max_chars: int = CUSTOM_CSS_MAX_CHARS) -> str:
 
 
 def _normalize_deck_in_place(deck_obj: "PresentationDeckSpec") -> "PresentationDeckSpec":
-    """Coerces theme / design style / custom CSS to safe, supported values (idempotent)."""
+    """Coerces theme / design style / UI format / custom CSS to safe, supported values (idempotent)."""
     if deck_obj.theme_color not in SUPPORTED_THEME_COLORS:
         deck_obj.theme_color = "sky"
     deck_obj.design_style = normalize_design_style(deck_obj.design_style)
+    deck_obj.ui_format = normalize_ui_format(getattr(deck_obj, "ui_format", DEFAULT_UI_FORMAT))
     deck_obj.custom_css = sanitize_custom_css(deck_obj.custom_css)
     return deck_obj
 
@@ -319,6 +360,13 @@ class PresentationDeckSpec(BaseModel):
             "editorial-light（生成り色の背景・明朝体見出し・フラットなカード）のいずれか"
         ),
     )
+    ui_format: str = Field(
+        default=DEFAULT_UI_FORMAT,
+        description=(
+            "UI形式（レイアウト）。portal（既定：4カラム構成のWeb提案ポータル形式＋スライド表示切替ボタン付き）"
+            "または slides（16:9 固定キャンバスのプレゼンスライド形式）のいずれか"
+        ),
+    )
     custom_css: str = Field(
         default="",
         description=(
@@ -408,6 +456,7 @@ def verify_password(password: str, expected_hash_hex: str, salt_hex: str) -> boo
 def render_deck_html(
     deck_spec: PresentationDeckSpec | dict[str, Any],
     generated_date: str | None = None,
+    ui_format: str | None = None,
 ) -> str:
     """Renders the 6-slide bespoke HTML5 presentation using deck_base.html.j2."""
     if isinstance(deck_spec, dict):
@@ -415,6 +464,8 @@ def render_deck_html(
     else:
         deck_obj = deck_spec
 
+    if ui_format is not None:
+        deck_obj.ui_format = normalize_ui_format(ui_format)
     _normalize_deck_in_place(deck_obj)
 
     if not generated_date:
@@ -430,6 +481,7 @@ def render_deck_html(
     html_output = template.render(
         deck=deck_obj,
         design_style=deck_obj.design_style,
+        ui_format=deck_obj.ui_format,
         custom_css=deck_obj.custom_css,
         generated_date=generated_date,
         brand_name=_get_brand_name(),
@@ -1024,6 +1076,20 @@ def _detect_requested_theme(text: str) -> str:
     return max(positions, key=lambda key: positions[key])
 
 
+_EDIT_UI_FORMAT_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("portal", r"ポータル|記事形式|ドキュメント形式|4カラム|４カラム|Web提案ポータル|\bportal\b"),
+    ("slides", r"スライド形式|16:9|１６：９|プレゼンスライド形式|スライドデッキ形式|\bslides\s+mode\b|\bslide\s+mode\b"),
+)
+
+
+def _detect_requested_ui_format(text: str) -> str:
+    """Returns 'portal' or 'slides' if explicitly requested in natural language, or ''."""
+    positions = _last_match_positions(_EDIT_UI_FORMAT_PATTERNS, text)
+    if not positions:
+        return ""
+    return max(positions, key=lambda key: positions[key])
+
+
 def _is_drastic_redesign(text: str) -> bool:
     return bool(re.search(_EDIT_DRASTIC_PATTERN, text or "", flags=_EDIT_REGEX_FLAGS))
 
@@ -1060,6 +1126,11 @@ def _apply_edit_heuristics(
         if not llm_used or candidate.theme_color == current.theme_color:
             candidate.theme_color = req_theme
             notes.append(f"キーワード解析: theme_color を {req_theme} に設定")
+    req_ui_fmt = _detect_requested_ui_format(instructions)
+    if req_ui_fmt and getattr(candidate, "ui_format", DEFAULT_UI_FORMAT) != req_ui_fmt:
+        if not llm_used or getattr(candidate, "ui_format", DEFAULT_UI_FORMAT) == getattr(current, "ui_format", DEFAULT_UI_FORMAT):
+            candidate.ui_format = req_ui_fmt
+            notes.append(f"キーワード解析: ui_format を {req_ui_fmt} に設定")
     if _is_drastic_redesign(instructions):
         if normalize_design_style(candidate.design_style) == current.design_style and not req_style:
             candidate.design_style = (
@@ -1073,6 +1144,7 @@ def _apply_edit_heuristics(
 
 
 _SPEC_CHANGE_LABELS: tuple[tuple[str, str], ...] = (
+    ("ui_format", "UI形式（レイアウト）"),
     ("design_style", "デザインスタイル"),
     ("theme_color", "アクセントカラー"),
     ("custom_css", "カスタムCSS"),
@@ -1110,7 +1182,12 @@ def describe_deck_changes(
         if old_value == new_value:
             continue
         changed.append(field_name)
-        if field_name == "design_style":
+        if field_name == "ui_format":
+            readable.append(
+                f"{label}: {UI_FORMAT_LABELS.get(str(old_value), old_value)} → "
+                f"{UI_FORMAT_LABELS.get(str(new_value), new_value)}"
+            )
+        elif field_name == "design_style":
             readable.append(
                 f"{label}: {DESIGN_STYLE_LABELS.get(str(old_value), old_value)} → "
                 f"{DESIGN_STYLE_LABELS.get(str(new_value), new_value)}"
@@ -1818,6 +1895,7 @@ def create_proposal_website(
     design_style: str = "",
     design_mode: str = "",
     design_request: str = "",
+    ui_format: str = "",
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
     """Issues the share URL / viewer ID / password immediately and generates the HTML5 proposal website in the background.
@@ -1866,6 +1944,7 @@ def create_proposal_website(
             design_style=design_style,
             design_mode=design_mode,
             design_request=design_request,
+            ui_format=ui_format,
         )
     except Exception as exc:  # noqa: BLE001
         return _tool_error(
@@ -1886,6 +1965,7 @@ def _create_proposal_website_impl(
     design_style: str = "",
     design_mode: str = "",
     design_request: str = "",
+    ui_format: str = "",
 ) -> dict[str, Any]:
     raw_spec = tool_context.state.get("deck_spec") if tool_context else None
     if not raw_spec and deck_spec_json:
@@ -1898,6 +1978,9 @@ def _create_proposal_website_impl(
     requested_style = (
         normalize_design_style(design_style, default="") if (design_style or "").strip() else ""
     ) or _detect_requested_style(f"{proposal_title} {proposal_brief} {design_request_text}")
+    requested_ui_format = (
+        normalize_ui_format(ui_format, default="") if (ui_format or "").strip() else ""
+    ) or _detect_requested_ui_format(f"{proposal_title} {proposal_brief} {design_request_text}") or DEFAULT_UI_FORMAT
 
     eff_client = (client_name or "").strip()
     eff_title = (proposal_title or "").strip()
@@ -1963,6 +2046,7 @@ def _create_proposal_website_impl(
         "subtitle": eff_brief[:160],
         "theme_color": theme,
         "design_style": requested_style or DEFAULT_DESIGN_STYLE,
+        "ui_format": requested_ui_format,
         "design_mode": mode,
         "content_version": 0,
         "skill_applied": "interactive-slide-designer",
@@ -1981,6 +2065,8 @@ def _create_proposal_website_impl(
         deck_obj.theme_color = theme
         if requested_style:
             deck_obj.design_style = requested_style
+        if (ui_format or "").strip() or _detect_requested_ui_format(f"{proposal_title} {proposal_brief} {design_request_text}"):
+            deck_obj.ui_format = requested_ui_format
         html_content = render_deck_html(
             deck_obj, generated_date=now_jst.strftime("%Y-%m-%d %H:%M JST")
         )
@@ -2017,6 +2103,7 @@ def _create_proposal_website_impl(
             "proposal_title": deck_obj.proposal_title,
             "theme_color": deck_obj.theme_color,
             "design_style": deck_obj.design_style,
+            "ui_format": deck_obj.ui_format,
             "design_mode": "template",
             "generation_engine": "state_deck_spec",
             "generation_engine_label": describe_generation_engine("state_deck_spec"),
@@ -2048,6 +2135,7 @@ def _create_proposal_website_impl(
                 "proposal_brief": eff_brief,
                 "theme_color": theme,
                 "design_style": requested_style or DEFAULT_DESIGN_STYLE,
+                "ui_format": requested_ui_format,
                 "outline_hint": outline_hint,
                 "design_mode": mode,
                 "design_request": design_request_text,
@@ -2087,6 +2175,7 @@ def _create_proposal_website_impl(
         "proposal_title": eff_title,
         "theme_color": theme,
         "design_style": requested_style or DEFAULT_DESIGN_STYLE,
+        "ui_format": requested_ui_format,
         "design_mode": mode,
         "generation_engine": generation_engine,
         "generation_engine_label": describe_generation_engine(generation_engine)
@@ -2331,6 +2420,7 @@ def get_proposal_status(
             "is_active": bool(data.get("is_active", True)),
             "design_mode": design_mode,
             "render_mode": render_mode,
+            "ui_format": normalize_ui_format(data.get("ui_format") or deck_spec_data.get("ui_format") or DEFAULT_UI_FORMAT),
             "design_style": data.get("design_style") or deck_spec_data.get("design_style") or DEFAULT_DESIGN_STYLE,
             "content_version": content_version,
             "freeform_version": freeform_version or None,
@@ -2376,6 +2466,8 @@ def edit_proposal_website(
     new_theme_color: str = "",
     new_custom_callout: str = "",
     new_design_style: str = "",
+    new_ui_format: str = "",
+    ui_format: str = "",
     undo_last_edit: bool = False,
     convert_to_freeform: bool = False,
     tool_context: ToolContext | None = None,
@@ -2427,6 +2519,7 @@ def edit_proposal_website(
             new_theme_color=new_theme_color,
             new_custom_callout=new_custom_callout,
             new_design_style=new_design_style,
+            new_ui_format=new_ui_format or ui_format,
             undo_last_edit=undo_last_edit,
             convert_to_freeform=convert_to_freeform,
             tool_context=tool_context,
@@ -2575,6 +2668,7 @@ def _edit_proposal_website_impl(
     new_theme_color: str = "",
     new_custom_callout: str = "",
     new_design_style: str = "",
+    new_ui_format: str = "",
     undo_last_edit: bool = False,
     convert_to_freeform: bool = False,
     tool_context: ToolContext | None = None,
@@ -2626,6 +2720,7 @@ def _edit_proposal_website_impl(
                 ("theme_color", new_theme_color),
                 ("custom_callout", new_custom_callout),
                 ("design_style", new_design_style),
+                ("ui_format", normalize_ui_format(new_ui_format, default="") if str(new_ui_format or "").strip() else _detect_requested_ui_format(edit_instructions or "")),
             )
             if str(value or "").strip()
         }
@@ -2666,6 +2761,14 @@ def _edit_proposal_website_impl(
         else:
             rejected.append(
                 f"デザインスタイル「{new_design_style}」は未対応です（immersive-dark / clean-light / editorial-light から選べます）"
+            )
+    if (new_ui_format or "").strip():
+        ui_req = normalize_ui_format(new_ui_format, default="")
+        if ui_req:
+            explicit["ui_format"] = ui_req
+        else:
+            rejected.append(
+                f"UI形式「{new_ui_format}」は未対応です（portal / slides から選べます）"
             )
     if not instructions and not explicit and not undo_last_edit and rejected:
         return {
@@ -2792,6 +2895,7 @@ def _edit_proposal_website_impl(
                     "subtitle": new_deck.subtitle,
                     "theme_color": new_deck.theme_color,
                     "design_style": new_deck.design_style,
+                    "ui_format": new_deck.ui_format,
                     "deck_spec": new_deck.model_dump(),
                     "previous_deck_spec": current_deck.model_dump(),
                     "content_version": new_version,
@@ -2856,6 +2960,7 @@ def _edit_proposal_website_impl(
         "proposal_title": new_deck.proposal_title,
         "subtitle": new_deck.subtitle,
         "theme_color": new_deck.theme_color,
+        "ui_format": new_deck.ui_format,
         "design_style": new_deck.design_style,
         "design_style_label": DESIGN_STYLE_LABELS.get(new_deck.design_style, new_deck.design_style),
         "custom_callout": new_deck.custom_callout,
@@ -2933,6 +3038,7 @@ def _freeform_last_edit_payload(
         "share_url": share_url,
         "kind": kind,
         "render_mode": "freeform" if _is_freeform_rendered(data) else str(data.get("render_mode") or "template"),
+        "ui_format": normalize_ui_format(data.get("ui_format") or DEFAULT_UI_FORMAT),
         "verified_changes": list(last.get("verified_changes") or []),
         "designer_notes": list(last.get("designer_notes") or []),
         "unsupported_requests": list(last.get("unsupported_requests") or []),
@@ -3048,6 +3154,7 @@ def _queue_freeform_edit(
         "kind": kind,
         "request_id": request_id,
         "render_mode": str(doc_data.get("render_mode") or "template"),
+        "ui_format": normalize_ui_format(explicit.get("ui_format") or doc_data.get("ui_format") or DEFAULT_UI_FORMAT),
         "edit_dispatch": dispatch_mode,
         "estimated_completion": eta,
         "verified_changes": [],
@@ -3682,9 +3789,13 @@ delete_presentation = delete_proposal_website
 CONCIERGE_INSTRUCTION = """あなたは提案書Webサイトの制作・配信・ライフサイクル管理を担う「インタラクティブ提案コンシェルジュ」です。
 ユーザーが対話を通じてクライアント向けのHTML5プレゼンテーションサイト（16:9）を企画・発行し、発行後の修正・閲覧ログ確認・パスワード変更・公開停止までをチャットだけで完結できるよう支援します。
 
-【デザインの作り方は2通り】
-- **自由デザイン（既定）**: ADK のデザイナーエージェント（gemini-3.8-flash）が、枚数・レイアウト・配色・図解（SVG）・グラフ、必要に応じて AI 生成イメージ（最大4点）まで自由に設計します。公開前に描画結果のスクリーンショットをエージェント自身が見て、崩れや読みにくさを最大2回まで直します。所要時間は通常 7〜11 分（最長約 20 分）です。
-- **高速モード（テンプレート）**: 定型の6枚構成テンプレートで、通常 1〜5 分で完成します。ユーザーが「高速モード」「テンプレートで」「急ぎで」と明示した場合だけ使います。
+【UI形式（2通り）とデザインの作り方（2通り）】
+- **UI形式（`ui_format`）**:
+  - **Web提案ポータル形式（`portal`・既定）**: 4カラム構成（左章レール・自動スクロール追従目次・中央記事リーダー・右KPI/根拠リファレンス）で、図解・表・本文をスクロールして深く読める技術提案ポータルです。右上の「▢ スライドで見る」ボタンから、いつでもワンクリックでプレゼンスライド表示に切り替えられます。
+  - **16:9 プレゼンスライド形式（`slides`）**: 従来の16:9固定キャンバスのスライド形式です。ユーザーが「スライド形式で」「16:9で」と明示した場合に `ui_format="slides"` を指定します。
+- **デザインの作り方（`design_mode`）**:
+  - **自由デザイン（`freeform`・既定）**: ADK のデザイナーエージェント（gemini-3.8-flash）が、章構成・レイアウト・配色・図解（SVG）・グラフ、必要に応じて AI 生成イメージ（最大4点）まで自由に設計します。公開前に描画結果のスクリーンショットをエージェント自身が見て、崩れや読みにくさを最大2回まで直します。所要時間は通常 7〜11 分（最長約 20 分）です。
+  - **高速モード（`template`）**: 定型の6章構成テンプレートで、通常 1〜5 分で完成します。ユーザーが「高速モード」「テンプレートで」「急ぎで」と明示した場合だけ使います。
 
 【最重要ルール：挨拶や曖昧な発話で勝手にWebサイトを生成しないこと】
 1. **挨拶・初回相談時の対応（ツール呼び出し禁止）**:

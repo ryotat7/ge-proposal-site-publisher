@@ -1,20 +1,33 @@
 /*!
- * NY deck runtime v1 — shared presentation runtime for free-form decks.
- * Fixed 1920x1080 stage scaled to the viewport, page navigation, progress, reveal / count-up / tabs
- * components, ECharts mounts, AI-image captions and print layout. Authors never write JavaScript:
- * every interactive behaviour is opt-in through data-pd-* attributes.
+ * NY deck runtime v1 — shared presentation & web proposal portal runtime for free-form decks.
+ * Supports two display modes from the same <main id="pd-deck"> authoring contract:
+ *   1. Web Proposal Portal Mode (html.pd-portal, triggered by data-pd-layout="portal" or ?view=portal):
+ *      4-column KUMIHAN editorial layout (Chapter Rail + Context Sidebar & Scroll-Spy TOC +
+ *      Center Article Reader + Right Reference Column) with built-in Slide Presentation toggle.
+ *   2. Classic 16:9 Slide Mode (default when data-pd-layout="slides" or ?view=slides):
+ *      Fixed 1920x1080 stage scaled to the viewport.
+ * Authors never write JavaScript: every interactive behaviour is opt-in through data-pd-* attributes.
  * Licensed under the Apache License, Version 2.0.
  */
 
 /* ---------- Overridable defaults (zero specificity via :where) ---------- */
-:where(html.pd-runtime),
-:where(html.pd-runtime) body {
+:where(html.pd-runtime:not(.pd-portal)),
+:where(html.pd-runtime:not(.pd-portal)) body {
   background: #0b0d12;
 }
 
-/* ---------- Stage (non-negotiable layout) ---------- */
-html.pd-runtime,
-html.pd-runtime body {
+/* ---------- Classic 16:9 Stage (active when NOT in .pd-portal) ---------- */
+html.pd-runtime:not(.pd-portal) .pd-portal-only {
+  display: none !important;
+}
+html.pd-runtime:not(.pd-portal) .pd-portal-shell,
+html.pd-runtime:not(.pd-portal) .pd-reader,
+html.pd-runtime:not(.pd-portal) .pd-article-wrap {
+  display: contents;
+}
+
+html.pd-runtime:not(.pd-portal),
+html.pd-runtime:not(.pd-portal) body {
   margin: 0 !important;
   padding: 0 !important;
   width: 100% !important;
@@ -22,14 +35,14 @@ html.pd-runtime body {
   overflow: hidden !important;
 }
 
-#pd-stage {
+html.pd-runtime:not(.pd-portal) #pd-stage {
   position: fixed !important;
   inset: 0 !important;
   overflow: hidden !important;
   background: inherit;
 }
 
-#pd-deck {
+html.pd-runtime:not(.pd-portal) #pd-deck {
   position: absolute !important;
   left: 50% !important;
   top: 50% !important;
@@ -43,7 +56,7 @@ html.pd-runtime body {
   overflow: hidden !important;
 }
 
-#pd-deck > section.pd-slide {
+html.pd-runtime:not(.pd-portal) #pd-deck > section.pd-slide {
   position: absolute !important;
   left: 0 !important;
   top: 0 !important;
@@ -60,7 +73,7 @@ html.pd-runtime body {
   transition: opacity 0.45s ease, visibility 0s linear 0.45s;
 }
 
-#pd-deck > section.pd-slide.is-active {
+html.pd-runtime:not(.pd-portal) #pd-deck > section.pd-slide.is-active {
   visibility: visible;
   opacity: 1;
   pointer-events: auto;
@@ -73,6 +86,679 @@ html.pd-instant [data-pd-reveal],
 html.pd-instant .pd-ai-badge {
   transition: none !important;
   animation: none !important;
+}
+
+/* ---------- Web Proposal Portal Mode (KUMIHAN 4-column editorial layout) ---------- */
+html.pd-runtime.pd-portal {
+  --pd-paper: #fafaf9;
+  --pd-surface: #ffffff;
+  --pd-subtle: #f4f4f5;
+  --pd-rail-bg: #18181b;
+  --pd-ink: #18181b;
+  --pd-ink-2: #3f3f46;
+  --pd-muted: #71717a;
+  --pd-rule: #e4e4e7;
+  --pd-accent-ink: var(--pd-accent, #1e40af);
+  --pd-accent-soft: #eff6ff;
+  --pd-warm: #b45309;
+  --pd-warm-soft: #fffbeb;
+  --pd-pos: #047857;
+  --pd-pos-soft: #ecfdf5;
+  background: var(--pd-paper) !important;
+  color: var(--pd-ink);
+  height: auto !important;
+  min-height: 100%;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}
+
+html.pd-runtime.pd-portal body {
+  margin: 0 !important;
+  padding: 0 !important;
+  width: 100% !important;
+  min-height: 100vh !important;
+  height: auto !important;
+  overflow-x: hidden !important;
+  overflow-y: visible !important;
+  background: var(--pd-paper) !important;
+  color: var(--pd-ink) !important;
+  font-family: "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", system-ui, -apple-system, sans-serif;
+  line-height: 1.8;
+  letter-spacing: 0.01em;
+  font-feature-settings: "palt" 1;
+}
+
+html.pd-runtime.pd-portal .pd-portal-shell {
+  display: grid;
+  grid-template-columns: 64px 272px minmax(0, 1fr) 268px;
+  min-height: 100vh;
+  width: 100%;
+  align-items: start;
+}
+
+@media (max-width: 1440px) {
+  html.pd-runtime.pd-portal .pd-portal-shell {
+    grid-template-columns: 60px 248px minmax(0, 1fr);
+  }
+  html.pd-runtime.pd-portal .pd-refs {
+    display: none !important;
+  }
+}
+
+@media (max-width: 1024px) {
+  html.pd-runtime.pd-portal .pd-portal-shell {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+  html.pd-runtime.pd-portal .pd-sidebar,
+  html.pd-runtime.pd-portal .pd-refs {
+    display: none !important;
+  }
+}
+
+/* Column 1: Left Chapter Rail */
+html.pd-runtime.pd-portal .pd-rail {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  background: var(--pd-rail-bg);
+  color: #a1a1aa;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px 0;
+  gap: 8px;
+  border-right: 1px solid #27272a;
+  z-index: 30;
+  box-sizing: border-box;
+}
+html.pd-runtime.pd-portal .pd-rail-brand {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  background: #2563eb;
+  color: #ffffff;
+  font: 700 13px/1 "Plus Jakarta Sans", system-ui, sans-serif;
+  letter-spacing: 0.06em;
+  display: grid;
+  place-items: center;
+  margin-bottom: 10px;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
+}
+html.pd-runtime.pd-portal .pd-rail-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  width: 42px;
+  height: 40px;
+  border-radius: 8px;
+  background: transparent;
+  color: #a1a1aa;
+  font: 600 12px/1 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+html.pd-runtime.pd-portal .pd-rail-btn:hover {
+  background: #27272a;
+  color: #f4f4f5;
+}
+html.pd-runtime.pd-portal .pd-rail-btn.is-active {
+  background: #f4f4f5;
+  color: #18181b;
+  font-weight: 700;
+}
+html.pd-runtime.pd-portal .pd-rail-spacer {
+  flex: 1;
+}
+html.pd-runtime.pd-portal .pd-rail-foot {
+  border-color: #3f3f46;
+  color: #e4e4e7;
+  font-size: 14px;
+}
+
+/* Column 2: Context Sidebar + Scroll-Spy TOC */
+html.pd-runtime.pd-portal .pd-sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  background: var(--pd-subtle);
+  border-right: 1px solid var(--pd-rule);
+  padding: 22px 18px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  box-sizing: border-box;
+}
+html.pd-runtime.pd-portal .pd-sidebar-head {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--pd-rule);
+}
+html.pd-runtime.pd-portal .pd-doc-badge {
+  display: inline-block;
+  font: 700 10px/1.2 "JetBrains Mono", ui-monospace, monospace;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #1e40af;
+  background: #dbeafe;
+  padding: 4px 8px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+html.pd-runtime.pd-portal .pd-client {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--pd-ink);
+  line-height: 1.45;
+  margin: 0 0 4px;
+}
+html.pd-runtime.pd-portal .pd-doc-meta {
+  font-size: 11.5px;
+  color: var(--pd-muted);
+  line-height: 1.4;
+}
+html.pd-runtime.pd-portal .pd-sidebar-label {
+  font: 700 10.5px/1.2 "Plus Jakarta Sans", system-ui, sans-serif;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--pd-muted);
+  margin: 0 0 6px;
+}
+html.pd-runtime.pd-portal .pd-chapter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+html.pd-runtime.pd-portal .pd-chapter-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  text-align: left;
+  padding: 9px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: 8px;
+  align-items: baseline;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+html.pd-runtime.pd-portal .pd-chapter-btn:hover {
+  background: rgba(24, 24, 27, 0.05);
+}
+html.pd-runtime.pd-portal .pd-chapter-btn.is-active {
+  background: var(--pd-surface);
+  border-color: var(--pd-rule);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+html.pd-runtime.pd-portal .pd-chapter-code {
+  font: 700 11px/1.2 "JetBrains Mono", ui-monospace, monospace;
+  color: #1e40af;
+}
+html.pd-runtime.pd-portal .pd-chapter-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--pd-ink);
+  line-height: 1.35;
+  display: block;
+}
+html.pd-runtime.pd-portal .pd-chapter-sub {
+  font-size: 11px;
+  color: var(--pd-muted);
+  line-height: 1.3;
+  display: block;
+  margin-top: 2px;
+}
+html.pd-runtime.pd-portal .pd-toc-box {
+  padding-top: 12px;
+  border-top: 1px solid var(--pd-rule);
+}
+html.pd-runtime.pd-portal .pd-toc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-left: 1px solid var(--pd-rule);
+  margin-left: 4px;
+  padding-left: 10px;
+}
+html.pd-runtime.pd-portal .pd-toc-link {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 5px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--pd-ink-2);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+html.pd-runtime.pd-portal .pd-toc-link.is-sub {
+  padding-left: 16px;
+  font-size: 11.5px;
+  color: var(--pd-muted);
+}
+html.pd-runtime.pd-portal .pd-toc-link:hover,
+html.pd-runtime.pd-portal .pd-toc-link.is-active {
+  color: #1e40af;
+  background: #eff6ff;
+  font-weight: 600;
+}
+
+/* Column 3: Center Article Reader */
+html.pd-runtime.pd-portal .pd-reader {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--pd-paper);
+}
+html.pd-runtime.pd-portal .pd-slide-bar {
+  display: none;
+}
+html.pd-runtime.pd-portal .pd-confbar {
+  background: #18181b;
+  color: #d4d4d8;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  padding: 7px 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+html.pd-runtime.pd-portal .pd-reader-bar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: rgba(250, 250, 249, 0.92);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--pd-rule);
+  padding: 12px 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+html.pd-runtime.pd-portal .pd-breadcrumb {
+  font-size: 12.5px;
+  color: var(--pd-muted);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html.pd-runtime.pd-portal .pd-breadcrumb strong {
+  color: var(--pd-ink);
+  font-weight: 700;
+}
+html.pd-runtime.pd-portal .pd-reader-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+html.pd-runtime.pd-portal .pd-slide-toggle-btn,
+html.pd-runtime.pd-portal .pd-slide-exit-btn {
+  appearance: none;
+  border: 1px solid #d4d4d8;
+  background: var(--pd-surface);
+  color: var(--pd-ink);
+  font: 600 12px/1.2 "Noto Sans JP", system-ui, sans-serif;
+  padding: 7px 13px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+html.pd-runtime.pd-portal .pd-slide-toggle-btn:hover {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: #1e40af;
+}
+html.pd-runtime.pd-portal .pd-article-wrap {
+  max-width: 960px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 36px 44px 72px;
+  box-sizing: border-box;
+  flex: 1;
+}
+html.pd-runtime.pd-portal #pd-stage {
+  position: static !important;
+  inset: auto !important;
+  overflow: visible !important;
+  background: transparent !important;
+}
+html.pd-runtime.pd-portal #pd-deck {
+  position: static !important;
+  left: auto !important;
+  top: auto !important;
+  width: 100% !important;
+  height: auto !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  transform: none !important;
+  overflow: visible !important;
+}
+html.pd-runtime.pd-portal #pd-deck > section.pd-slide {
+  position: static !important;
+  left: auto !important;
+  top: auto !important;
+  width: 100% !important;
+  height: auto !important;
+  min-height: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  box-sizing: border-box;
+  overflow: visible !important;
+  display: none;
+  visibility: visible !important;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+  background: transparent;
+  color: var(--pd-ink);
+}
+html.pd-runtime.pd-portal #pd-deck > section.pd-slide.is-active {
+  display: block !important;
+}
+
+/* Editorial typography & components inside Portal Article sections */
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) h1 {
+  font-size: clamp(24px, 2.5vw, 32px);
+  line-height: 1.35;
+  font-weight: 800;
+  color: #18181b;
+  letter-spacing: -0.01em;
+  margin: 0 0 16px;
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) h2 {
+  font-size: 20px;
+  line-height: 1.45;
+  font-weight: 700;
+  color: #18181b;
+  margin: 34px 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e4e4e7;
+  scroll-margin-top: 72px;
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) h3 {
+  font-size: 16px;
+  line-height: 1.5;
+  font-weight: 700;
+  color: #27272a;
+  margin: 22px 0 8px;
+  scroll-margin-top: 72px;
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) p,
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) li {
+  font-size: 15px;
+  line-height: 1.85;
+  color: #27272a;
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) .pd-hero,
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) .hero {
+  background: #ffffff;
+  border: 1px solid #e4e4e7;
+  border-top: 3px solid #1e40af;
+  border-radius: 10px;
+  padding: 28px 32px;
+  margin-bottom: 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) .pd-lead,
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) .lead {
+  font-size: 16px;
+  line-height: 1.85;
+  color: #3f3f46;
+  margin: 10px 0 0;
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) .pd-kpi-strip,
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) .kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  margin: 20px 0 28px;
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) .pd-kpi,
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) .kpi {
+  background: #ffffff;
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  padding: 16px 18px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) .pd-callout,
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) .callout {
+  background: #eff6ff;
+  border-left: 4px solid #1e40af;
+  border-radius: 0 8px 8px 0;
+  padding: 16px 20px;
+  margin: 20px 0;
+  color: #1e3a8a;
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) .two-col {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 18px;
+  margin: 18px 0;
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) .three-col {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin: 18px 0;
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) .pd-card,
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) .card {
+  background: #ffffff;
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  padding: 18px 20px;
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 18px 0;
+  font-size: 13.5px;
+  background: #ffffff;
+  border: 1px solid #e4e4e7;
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) th,
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) td {
+  padding: 10px 14px;
+  border-bottom: 1px solid #e4e4e7;
+  text-align: left;
+  vertical-align: top;
+  line-height: 1.6;
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) th {
+  background: #f4f4f5;
+  font-weight: 700;
+  color: #18181b;
+}
+:where(html.pd-runtime.pd-portal #pd-deck > section.pd-slide) svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Prev / Next Chapter Pager & Footer */
+html.pd-runtime.pd-portal .pd-pager {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid var(--pd-rule);
+}
+html.pd-runtime.pd-portal .pd-pager-btn {
+  appearance: none;
+  border: 1px solid var(--pd-rule);
+  background: var(--pd-surface);
+  border-radius: 8px;
+  padding: 14px 18px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+html.pd-runtime.pd-portal .pd-pager-btn.is-next {
+  text-align: right;
+}
+html.pd-runtime.pd-portal .pd-pager-btn:hover:not([disabled]) {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+html.pd-runtime.pd-portal .pd-pager-btn[disabled] {
+  opacity: 0.4;
+  cursor: default;
+}
+html.pd-runtime.pd-portal .pd-pager-dir {
+  display: block;
+  font: 700 10.5px/1.2 "JetBrains Mono", ui-monospace, monospace;
+  color: var(--pd-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}
+html.pd-runtime.pd-portal .pd-pager-title {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--pd-ink);
+}
+html.pd-runtime.pd-portal .pd-footer {
+  padding: 18px 44px;
+  border-top: 1px solid var(--pd-rule);
+  font-size: 11.5px;
+  color: var(--pd-muted);
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* Hide author-supplied inline <aside class="pd-refs"> inside slides (rendered in Column 4 instead) */
+#pd-deck > section.pd-slide aside.pd-refs,
+#pd-deck > section.pd-slide [data-pd-ref] {
+  display: none !important;
+}
+
+/* Column 4: Right Reference Column */
+html.pd-runtime.pd-portal .pd-portal-shell > .pd-refs {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  background: var(--pd-paper);
+  border-left: 1px solid var(--pd-rule);
+  padding: 22px 18px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-sizing: border-box;
+}
+html.pd-runtime.pd-portal .pd-ref-card {
+  background: var(--pd-surface);
+  border: 1px solid var(--pd-rule);
+  border-radius: 8px;
+  padding: 14px 15px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+html.pd-runtime.pd-portal .pd-ref-title {
+  font: 700 10.5px/1.2 "Plus Jakarta Sans", system-ui, sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #1e40af;
+  margin: 0 0 8px;
+}
+html.pd-runtime.pd-portal .pd-ref-item {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--pd-ink-2);
+  padding: 5px 0;
+  border-bottom: 1px dashed #e4e4e7;
+}
+html.pd-runtime.pd-portal .pd-ref-item:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+/* Hide bottom floating slide chrome when in normal Portal reading view */
+html.pd-runtime.pd-portal:not(.pd-portal-slides) #pd-nav,
+html.pd-runtime.pd-portal:not(.pd-portal-slides) #pd-progress {
+  display: none !important;
+}
+
+/* ---------- Portal Built-in Slide Presentation Mode (html.pd-portal.pd-portal-slides) ---------- */
+html.pd-runtime.pd-portal.pd-portal-slides {
+  background: #09090b !important;
+}
+html.pd-runtime.pd-portal.pd-portal-slides body {
+  background: #09090b !important;
+}
+html.pd-runtime.pd-portal.pd-portal-slides .pd-portal-shell {
+  display: flex !important;
+  flex-direction: column;
+  min-height: 100vh;
+}
+html.pd-runtime.pd-portal.pd-portal-slides .pd-rail,
+html.pd-runtime.pd-portal.pd-portal-slides .pd-sidebar,
+html.pd-runtime.pd-portal.pd-portal-slides .pd-confbar,
+html.pd-runtime.pd-portal.pd-portal-slides .pd-reader-bar,
+html.pd-runtime.pd-portal.pd-portal-slides .pd-pager,
+html.pd-runtime.pd-portal.pd-portal-slides .pd-footer,
+html.pd-runtime.pd-portal.pd-portal-slides .pd-refs {
+  display: none !important;
+}
+html.pd-runtime.pd-portal.pd-portal-slides .pd-reader {
+  background: #09090b !important;
+  min-height: 100vh;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+html.pd-runtime.pd-portal.pd-portal-slides .pd-slide-bar {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  height: 52px;
+  padding: 0 24px;
+  background: #18181b;
+  border-bottom: 1px solid #27272a;
+  color: #f4f4f5;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+}
+html.pd-runtime.pd-portal.pd-portal-slides .pd-slide-bar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e4e4e7;
+}
+html.pd-runtime.pd-portal.pd-portal-slides .pd-slide-exit-btn {
+  background: #27272a;
+  border-color: #3f3f46;
+  color: #fafafa;
+}
+html.pd-runtime.pd-portal.pd-portal-slides .pd-slide-exit-btn:hover {
+  background: #3f3f46;
+}
+html.pd-runtime.pd-portal.pd-portal-slides .pd-article-wrap {
+  max-width: 1360px;
+  width: calc(100% - 48px);
+  margin: 24px auto 68px;
+  padding: 40px 56px !important;
+  background: var(--pd-paper, #fafaf9);
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+  border: 1px solid #27272a;
 }
 
 /* ---------- Reveal ---------- */
@@ -109,6 +795,11 @@ html.pd-runtime [data-pd-tab] { cursor: pointer; }
   letter-spacing: 0.04em;
   pointer-events: none;
   white-space: nowrap;
+}
+html.pd-runtime.pd-portal .pd-chart-badge,
+html.pd-runtime.pd-portal .pd-ai-badge {
+  font-size: 11.5px;
+  padding: 4px 10px;
 }
 .pd-chart-badge { top: 10px; right: 10px; }
 .pd-ai-badge {
@@ -199,6 +890,7 @@ html.pd-capture .pd-chrome { display: none !important; }
   @page { size: 1920px 1080px; margin: 0; }
   html.pd-runtime,
   html.pd-runtime body { width: auto !important; height: auto !important; overflow: visible !important; }
+  .pd-portal-only { display: none !important; }
   #pd-stage { position: static !important; overflow: visible !important; }
   #pd-deck {
     position: static !important;
@@ -208,6 +900,7 @@ html.pd-capture .pd-chrome { display: none !important; }
   }
   #pd-deck > section.pd-slide {
     position: relative !important;
+    display: block !important;
     visibility: visible !important;
     opacity: 1 !important;
     break-after: page;

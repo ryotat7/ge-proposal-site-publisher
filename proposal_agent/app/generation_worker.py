@@ -197,6 +197,7 @@ def _inputs_of(data: dict[str, Any]) -> dict[str, Any]:
         "proposal_brief": str(inputs.get("proposal_brief") or data.get("subtitle") or proposal_title),
         "theme_color": str(inputs.get("theme_color") or data.get("theme_color") or "sky"),
         "design_style": agent_mod.normalize_design_style(inputs.get("design_style") or data.get("design_style")),
+        "ui_format": agent_mod.normalize_ui_format(inputs.get("ui_format") or data.get("ui_format")),
         "outline_hint": str(inputs.get("outline_hint") or ""),
         "design_request": str(inputs.get("design_request") or ""),
         "design_mode": str(inputs.get("design_mode") or data.get("design_mode") or "template"),
@@ -299,6 +300,7 @@ def _generate_template(
 
     # The look requested at creation always wins; free-form custom CSS is reserved for explicit edits.
     deck_obj.design_style = inputs["design_style"]
+    deck_obj.ui_format = inputs.get("ui_format") or agent_mod.DEFAULT_UI_FORMAT
     deck_obj.custom_css = ""
     extra = dict(extra_updates or {})
     if fallback_reason:
@@ -394,6 +396,7 @@ def _generate_freeform(
                 {
                     "client_name": inputs["client_name"],
                     "proposal_title": inputs["proposal_title"],
+                    "ui_format": inputs.get("ui_format") or agent_mod.DEFAULT_UI_FORMAT,
                     "generation_status": "ready",
                     "generation_phase": "ready",
                     "generation_detail": "",
@@ -458,6 +461,7 @@ def _edit_request_md(request: dict[str, Any]) -> str:
         "theme_color": "アクセントカラーを次の系統にする",
         "custom_callout": "表紙に次の強調ラベルを入れる",
         "design_style": "全体の見た目を次のスタイルにする（immersive-dark=濃紺ダーク、clean-light=白基調、editorial-light=生成り色・明朝見出し）",
+        "ui_format": "UI形式（レイアウト）を次の形式にする（portal=4カラムWeb提案ポータル形式 <main id=\"pd-deck\" data-pd-layout=\"portal\">、slides=16:9プレゼンスライド形式 <main id=\"pd-deck\" data-pd-layout=\"slides\">）",
     }
     if explicit:
         lines.append("## 明示的な指定（必ず反映）")
@@ -622,6 +626,10 @@ def apply_freeform_edit(presentation_id: str) -> dict[str, Any]:
             return {"status": "NO_CHANGE", "presentation_id": presentation_id}
 
         updates = freeform.publish_outcome(run, store, data, outcome)
+        explicit_req = request.get("explicit_changes") if isinstance(request.get("explicit_changes"), dict) else {}
+        req_ui_fmt = str(explicit_req.get("ui_format") or "").strip() or agent_mod._detect_requested_ui_format(str(request.get("instructions") or ""))
+        if req_ui_fmt:
+            updates["ui_format"] = agent_mod.normalize_ui_format(req_ui_fmt)
         now = _now_iso()
         engine = freeform.engine_name()
         updates.update(

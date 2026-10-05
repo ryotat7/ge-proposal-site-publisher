@@ -318,3 +318,32 @@ def test_svg_animation_cannot_rewrite_links() -> None:
     index = dc.build_publishable(files).files["index.html"].decode("utf-8")
     assert "javascript" not in index
 
+
+
+def test_portal_layout_and_describe_changes_layout_switch() -> None:
+    portal_html = (
+        '<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8"><title>Acme Portal</title></head>'
+        '<body><main id="pd-deck" data-pd-layout="portal">'
+        '<section class="pd-slide" data-pd-title="01. エグゼクティブサマリー" data-pd-subtitle="全体像">'
+        '<h2>1. 現状の課題</h2><p>本文</p><h3>1.1 詳細</h3>'
+        '<aside class="pd-refs"><h4>関連資料</h4><ul><li>RFP.pdf</li></ul></aside>'
+        '</section>'
+        '<section class="pd-slide" data-pd-title="02. 解決アプローチ"><h2>2. 提案内容</h2><p>本文</p></section>'
+        '<section class="pd-slide" data-pd-title="03. アーキテクチャ"><h2>3. 構成図</h2><p>本文</p></section>'
+        '</main></body></html>'
+    )
+    res_portal = dc.build_publishable({"index.html": portal_html.encode("utf-8")}, title="Acme Portal")
+    assert res_portal.errors == [], res_portal.summary()
+    published_index = res_portal.files["index.html"].decode("utf-8")
+    assert 'data-pd-layout="portal"' in published_index
+    assert 'class="pd-refs"' in published_index
+
+    slides_html = portal_html.replace('data-pd-layout="portal"', 'data-pd-layout="slides"')
+    res_slides = dc.build_publishable({"index.html": slides_html.encode("utf-8")}, title="Acme Portal")
+    assert res_slides.errors == [], res_slides.summary()
+
+    diff_to_slides = dc.describe_changes(res_portal.files, res_slides.files)
+    assert any("UI形式（レイアウト）" in c and "slides" in c for c in diff_to_slides), diff_to_slides
+
+    diff_to_portal = dc.describe_changes(res_slides.files, res_portal.files)
+    assert any("UI形式（レイアウト）" in c and "portal" in c for c in diff_to_portal), diff_to_portal

@@ -751,6 +751,12 @@ def describe_changes(old_files: dict[str, bytes], new_files: dict[str, bytes]) -
     changes: list[str] = []
     old_html = (old_files.get("source.html") or old_files.get("index.html") or b"").decode("utf-8", "replace")
     new_html = (new_files.get("source.html") or new_files.get("index.html") or b"").decode("utf-8", "replace")
+    old_layout_m = re.search(r'<main[^>]*id=["\']pd-deck["\'][^>]*data-pd-layout=["\']([^"\']+)["\']', old_html, flags=re.IGNORECASE)
+    new_layout_m = re.search(r'<main[^>]*id=["\']pd-deck["\'][^>]*data-pd-layout=["\']([^"\']+)["\']', new_html, flags=re.IGNORECASE)
+    old_layout = (old_layout_m.group(1).strip().lower() if old_layout_m else "slides") if old_html else ""
+    new_layout = (new_layout_m.group(1).strip().lower() if new_layout_m else "slides") if new_html else ""
+    if old_html and new_html and old_layout != new_layout:
+        changes.append(f"UI形式（レイアウト）: 「{old_layout}」→「{new_layout}」")
     old_slides = extract_slides(old_html) if old_html else []
     new_slides = extract_slides(new_html) if new_html else []
     if len(old_slides) != len(new_slides):
