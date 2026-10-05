@@ -641,12 +641,13 @@ html.pd-runtime.pd-portal .pd-footer {
 
 /* Column 4: Right Reference Column (Fixed to viewport) */
 html.pd-runtime.pd-portal .pd-portal-shell > .pd-refs {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
+  position: fixed !important;
+  top: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  margin: 0 !important;
   width: 268px;
-  height: 100vh;
+  height: 100vh !important;
   overflow-y: auto;
   background: var(--pd-paper);
   border-left: 1px solid var(--pd-rule);
